@@ -1,0 +1,180 @@
+@import 'tailwindcss';
+@plugin 'tailwindcss-animate';
+
+/*
+ * Theme System for Tailwind v4 — mirrors packages/frontend/src/app/globals.css.
+ *
+ * Strategy: Define theme tokens with fallback (light) values in @theme inline,
+ * then override the --theme-* custom properties for dark mode via
+ * html[data-theme='dark']. Tailwind always has valid values at build time and
+ * utilities like bg-elevated-secondary / text-muted-foreground / bg-warning-muted
+ * resolve per-theme at runtime.
+ */
+
+@theme inline {
+  /* Geist / Geist Mono are loaded via next/font/google in the root layout,
+     which exposes --font-geist-sans / --font-geist-mono on <html>. */
+  --font-sans: var(--font-geist-sans), 'Geist', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono:
+    var(--font-geist-mono), 'Geist Mono', ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo,
+    Consolas, monospace;
+
+  /* Primary colors */
+  --color-primary: var(--theme-primary, rgb(37, 99, 235));
+  --color-primary-foreground: var(--theme-primary-foreground, rgb(255, 255, 255));
+
+  /* Surface colors */
+  --color-main-surface-primary: var(--theme-main-surface-primary, #fff);
+  --color-elevated-secondary: var(--theme-elevated-secondary, #f9f9f9);
+  --color-background-hover: var(--theme-background-hover, #f2f3f5);
+
+  /* Text colors */
+  --color-foreground: var(--theme-foreground, rgb(30, 41, 59));
+  --color-muted-foreground: var(--theme-muted-foreground, rgb(107, 114, 128));
+
+  /* Border and input */
+  --color-border: var(--theme-border, rgb(229, 231, 235));
+  --color-input: var(--theme-input, rgb(255, 255, 255));
+  --color-ring: var(--theme-ring, rgb(37, 99, 235));
+
+  /* Muted */
+  --color-muted: var(--theme-muted, rgb(243, 244, 246));
+
+  /* Secondary */
+  --color-secondary: var(--theme-secondary, rgb(243, 244, 246));
+  --color-secondary-foreground: var(--theme-secondary-foreground, rgb(55, 65, 81));
+
+  /* Status colors */
+  --color-success: var(--theme-success, rgb(16, 185, 129));
+  --color-success-muted: var(--theme-success-muted, rgba(16, 185, 129, 0.15));
+  --color-destructive: var(--theme-destructive, rgb(248, 113, 113));
+  --color-destructive-muted: var(--theme-destructive-muted, rgba(248, 113, 113, 0.15));
+  /* Muted brick for solid danger buttons (white text reads in both themes) */
+  --color-destructive-solid: var(--theme-destructive-solid, #c0504a);
+  --color-warning: var(--theme-warning, rgb(245, 158, 11));
+  --color-warning-muted: var(--theme-warning-muted, rgba(245, 158, 11, 0.15));
+  --color-info: var(--theme-info, rgb(59, 130, 246));
+  --color-info-muted: var(--theme-info-muted, rgba(59, 130, 246, 0.15));
+}
+
+/* Dark theme - override the --theme-* variables */
+html[data-theme='dark'] {
+  --theme-primary: rgb(37, 99, 235);
+  --theme-primary-foreground: rgb(255, 255, 255);
+  --theme-border: rgb(55, 65, 81);
+  --theme-input: rgb(31, 41, 55);
+  --theme-ring: rgb(161, 165, 170);
+  --theme-muted: rgb(31, 41, 55);
+  --theme-background-hover: #32363f;
+  --theme-success: rgb(16, 185, 129);
+  --theme-success-muted: rgba(16, 185, 129, 0.2);
+  --theme-destructive: rgb(248, 113, 113);
+  --theme-destructive-muted: rgba(248, 113, 113, 0.2);
+  --theme-destructive-solid: #c0504a;
+  --theme-warning: rgb(245, 158, 11);
+  --theme-warning-muted: rgba(245, 158, 11, 0.2);
+  --theme-info: rgb(59, 130, 246);
+  --theme-info-muted: rgba(59, 130, 246, 0.2);
+  --theme-secondary: rgb(55, 65, 81);
+  --theme-secondary-foreground: rgb(209, 213, 219);
+  --theme-main-surface-primary: rgb(17, 24, 39);
+  --theme-elevated-secondary: rgb(31, 41, 55);
+  --theme-foreground: rgb(243, 244, 246);
+  --theme-muted-foreground: rgb(156, 163, 175);
+}
+
+/* Font configuration */
+body,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family:
+    var(--font-sans),
+    system-ui,
+    -apple-system,
+    sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+button,
+[type='button'],
+[type='submit'],
+[type='reset'] {
+  cursor: pointer;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-main-surface-primary text-foreground;
+  }
+}
+
+/* Markdown preview (Goal & Memory on /settings) — token-based, both themes. */
+.markdown-preview {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--color-foreground);
+}
+.markdown-preview h1,
+.markdown-preview h2,
+.markdown-preview h3,
+.markdown-preview h4 {
+  font-weight: 700;
+  margin: 1.1em 0 0.4em;
+}
+.markdown-preview h1 { font-size: 1.15rem; }
+.markdown-preview h2 { font-size: 1rem; }
+.markdown-preview h3,
+.markdown-preview h4 { font-size: 0.875rem; }
+.markdown-preview h1:first-child,
+.markdown-preview h2:first-child,
+.markdown-preview p:first-child { margin-top: 0; }
+.markdown-preview p { margin: 0.5em 0; }
+.markdown-preview ul,
+.markdown-preview ol { margin: 0.5em 0; padding-left: 1.4em; }
+.markdown-preview ul { list-style: disc; }
+.markdown-preview ol { list-style: decimal; }
+.markdown-preview li { margin: 0.2em 0; }
+.markdown-preview code {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.75rem;
+  background: var(--color-muted);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.markdown-preview pre {
+  background: var(--color-muted);
+  border-radius: 8px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.markdown-preview pre code { background: transparent; padding: 0; }
+.markdown-preview a { color: var(--color-primary); text-decoration: underline; }
+.markdown-preview blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 0.75rem;
+  margin: 0.6em 0;
+  color: var(--color-muted-foreground);
+}
+.markdown-preview hr { border-color: var(--color-border); margin: 1em 0; }
+.markdown-preview strong { font-weight: 600; }
+.markdown-preview table { border-collapse: collapse; margin: 0.6em 0; }
+.markdown-preview th,
+.markdown-preview td {
+  border: 1px solid var(--color-border);
+  padding: 0.3em 0.6em;
+  font-size: 0.75rem;
+}
