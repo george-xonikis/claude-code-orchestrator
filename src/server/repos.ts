@@ -104,9 +104,9 @@ async function readRegistry(): Promise<RepoEntry[]> {
   );
 }
 
-/** True if the repo has both planning persona files under .claude/agents/. */
-async function hasPersonas(repoPath: string): Promise<boolean> {
-  const checks = await Promise.all(
+/** Which planning persona files exist under .claude/agents/ (engineer, pm). */
+async function personaPresence(repoPath: string): Promise<{ engineer: boolean; pm: boolean }> {
+  const [engineer, pm] = await Promise.all(
     PERSONA_FILES.map((file) =>
       fsp.access(path.join(repoPath, '.claude', 'agents', file)).then(
         () => true,
@@ -114,7 +114,7 @@ async function hasPersonas(repoPath: string): Promise<boolean> {
       )
     )
   );
-  return checks.every(Boolean);
+  return { engineer, pm };
 }
 
 /** Normalize a git remote URL (https or ssh form) to a GitHub web URL. */
@@ -141,10 +141,15 @@ async function originHtmlUrl(repoPath: string): Promise<string | undefined> {
 /** Entry + computed fields (hasPersonas, htmlUrl) as served by GET /api/repos. */
 async function toRepoInfo(entry: RepoEntry): Promise<RepoInfo> {
   const [personas, htmlUrl] = await Promise.all([
-    hasPersonas(entry.path),
+    personaPresence(entry.path),
     originHtmlUrl(entry.path),
   ]);
-  return { ...entry, hasPersonas: personas, ...(htmlUrl ? { htmlUrl } : {}) };
+  return {
+    ...entry,
+    personas,
+    hasPersonas: personas.engineer && personas.pm,
+    ...(htmlUrl ? { htmlUrl } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

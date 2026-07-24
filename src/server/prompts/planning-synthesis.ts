@@ -12,6 +12,9 @@ export function synthesisPrompt(
   return [
     'You are the synthesis step of a planning meeting between a Principal',
     'Engineer and a Product Manager. Their independent proposal lists are below.',
+    'ONE of the two reports may be empty — that means only that role ran this',
+    'pass. In that case just normalize and rank that role\'s proposals (set',
+    'source to the role that ran); do NOT invent proposals for the missing role.',
     'Merge them into ONE deduped list:',
     '- When both describe the same underlying work, merge into a single item',
     '  with source "both", combining the PM problem/outcome framing with the',

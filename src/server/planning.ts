@@ -328,34 +328,36 @@ async function runPlanningAgent(
   return runPlanningQuery(repoPath, planningAgentPrompt(body, exclusions), undefined, onEvent);
 }
 
+/** Which planning agents a pass runs. */
+export type PlanningRole = 'engineer' | 'pm';
+
 /**
- * Both persona definition files must exist in the repo before a pass can run.
- * Throws a clear error naming the expected files (surfaced on the Planning page).
+ * The persona files for the requested roles must exist before a pass can run.
+ * Throws a clear error naming any missing files (surfaced on the Planning page).
+ * Returns absolute paths for both roles (only the requested ones are validated).
  */
 async function requirePersonaFiles(
-  repo: RepoInfo
-): Promise<{ engineer: string; pm: string }> {
-  const engineer = path.join(repo.path, PERSONA_FILES.engineer);
-  const pm = path.join(repo.path, PERSONA_FILES.pm);
+  repo: RepoInfo,
+  roles: PlanningRole[]
+): Promise<Record<PlanningRole, string>> {
+  const paths: Record<PlanningRole, string> = {
+    engineer: path.join(repo.path, PERSONA_FILES.engineer),
+    pm: path.join(repo.path, PERSONA_FILES.pm),
+  };
   const missing: string[] = [];
-  for (const [label, file] of [
-    [PERSONA_FILES.engineer, engineer],
-    [PERSONA_FILES.pm, pm],
-  ] as const) {
+  for (const role of roles) {
     try {
-      await fsp.access(file);
+      await fsp.access(paths[role]);
     } catch {
-      missing.push(label);
+      missing.push(PERSONA_FILES[role]);
     }
   }
   if (missing.length > 0) {
     throw new Error(
-      `Planning personas missing in ${repo.name}: create ${missing.join(
-        ' and '
-      )} (planning passes need both ${PERSONA_FILES.engineer} and ${PERSONA_FILES.pm} in the repo)`
+      `Planning personas missing in ${repo.name}: create ${missing.join(' and ')}`
     );
   }
-  return { engineer, pm };
+  return paths;
 }
 
 // ---------------------------------------------------------------------------
@@ -429,11 +431,13 @@ function parseProposals(raw: string): PlanningProposal[] {
  */
 export async function startPlanningPass(
   repo: RepoInfo,
-  options: { auto?: boolean } = {}
+  options: { auto?: boolean; roles?: PlanningRole[] } = {}
 ): Promise<string> {
   const g = planningState(repo.id);
   if (g.running) throw new Error('A planning pass is already running');
-  const personas = await requirePersonaFiles(repo);
+  const roles: PlanningRole[] =
+    options.roles && options.roles.length > 0 ? options.roles : ['engineer', 'pm'];
+  const personas = await requirePersonaFiles(repo, roles);
   g.running = true;
 
   const pass: PlanningPass = {
@@ -476,14 +480,23 @@ export async function startPlanningPass(
     };
 
     try {
-      const [engineerReport, pmReport] = await Promise.all([
-        runPlanningAgent(repo.path, personas.engineer, exclusions, record('engineer')),
-        runPlanningAgent(repo.path, personas.pm, exclusions, record('pm')),
-      ]);
+      // Run only the selected agents; the unselected report stays empty and
+      // synthesis formats whichever report(s) are present.
+      const reports: Record<PlanningRole, string> = { engineer: '', pm: '' };
+      await Promise.all(
+        roles.map(async (role) => {
+          reports[role] = await runPlanningAgent(
+            repo.path,
+            personas[role],
+            exclusions,
+            record(role)
+          );
+        })
+      );
       const proposals = parseProposals(
         await runPlanningQuery(
           repo.path,
-          synthesisPrompt(engineerReport, pmReport, exclusions),
+          synthesisPrompt(reports.engineer, reports.pm, exclusions),
           undefined,
           record('synthesis')
         )

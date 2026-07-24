@@ -16,6 +16,8 @@ export interface RepoInfo {
   path: string;
   /** Whether <repo>/.claude/agents/ contains both planning persona files (computed at read time). */
   hasPersonas?: boolean;
+  /** Which individual planning persona files exist (computed at read time). */
+  personas?: { engineer: boolean; pm: boolean };
   /** GitHub web URL derived from the `origin` remote (computed at read time; absent if unparsable). */
   htmlUrl?: string;
 }

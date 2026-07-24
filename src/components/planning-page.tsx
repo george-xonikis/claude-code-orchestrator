@@ -26,13 +26,26 @@ import {
   type DiscussionMessage,
   filePlanningProposals,
   getPlanning,
+  type PlanningRole,
   setPlanningInterval,
   startPlanningPass,
 } from '@/components/shared/task-actions';
 import { useRepo } from '@/components/shared/use-repo';
 
-/** Both planning persona files a repo needs under .claude/agents/. */
-const PERSONA_FILES = ['.claude/agents/principal-engineer.md', '.claude/agents/product-manager.md'];
+/** Planning persona file for each role, under .claude/agents/. */
+const PERSONA_FILE_BY_ROLE: Record<PlanningRole, string> = {
+  engineer: '.claude/agents/principal-engineer.md',
+  pm: '.claude/agents/product-manager.md',
+};
+
+/** Which agents a "Plan" click runs. */
+const PLAN_SCOPES = [
+  { value: 'both', label: 'PE + PM', roles: ['engineer', 'pm'] as PlanningRole[] },
+  { value: 'engineer', label: 'PE only', roles: ['engineer'] as PlanningRole[] },
+  { value: 'pm', label: 'PM only', roles: ['pm'] as PlanningRole[] },
+] as const;
+
+type PlanScope = (typeof PLAN_SCOPES)[number]['value'];
 
 const INTERVAL_OPTIONS = [
   { value: '', label: 'Auto-run: off' },
@@ -298,6 +311,7 @@ export function PlanningPage() {
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [scope, setScope] = useState<PlanScope>('both');
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
     null
   );
@@ -358,10 +372,12 @@ export function PlanningPage() {
   const selectedIdsIn = (pass: PlanningPass) =>
     pass.proposals.filter((p) => selected.has(`${pass.id}:${p.id}`)).map((p) => p.id);
 
+  const scopeRoles = PLAN_SCOPES.find((s) => s.value === scope)!.roles;
+
   const handleStart = () => {
     if (!repoId) return;
     setBusy(true);
-    startPlanningPass(repoId)
+    startPlanningPass(repoId, scopeRoles)
       .then(refresh)
       .catch(() => {})
       .finally(() => setBusy(false));
@@ -400,7 +416,14 @@ export function PlanningPage() {
     return <div className="p-6 text-sm text-muted-foreground">Loading planning passes…</div>;
   }
 
-  const missingPersonas = current?.hasPersonas === false;
+  // Per-role persona presence (falls back to hasPersonas if the granular flag
+  // isn't on the repo yet), gated to the roles the chosen scope will run.
+  const personas = current?.personas ?? {
+    engineer: current?.hasPersonas ?? false,
+    pm: current?.hasPersonas ?? false,
+  };
+  const missingForScope = scopeRoles.filter((role) => !personas[role]);
+  const canPlan = missingForScope.length === 0;
 
   return (
     <div className="flex items-start gap-6 p-6">
@@ -420,9 +443,21 @@ export function PlanningPage() {
               </option>
             ))}
           </select>
+          <select
+            value={scope}
+            onChange={(event) => setScope(event.target.value as PlanScope)}
+            aria-label="Planning scope"
+            className="h-8 rounded-md border border-border bg-elevated-secondary px-2 text-xs font-medium outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
+          >
+            {PLAN_SCOPES.map(({ value, label }) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
           <button
             type="button"
-            disabled={busy || running || missingPersonas}
+            disabled={busy || running || !canPlan}
             onClick={handleStart}
             className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
@@ -432,20 +467,25 @@ export function PlanningPage() {
         </div>
       </div>
 
-      {missingPersonas && (
+      {missingForScope.length > 0 && (
         <div className="rounded-lg bg-warning-muted px-4 py-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-warning">
-            Planning personas missing
+            Planning persona{missingForScope.length > 1 ? 's' : ''} missing
           </div>
           <p className="mt-1 text-sm leading-snug">
-            {current?.name} has no planning personas. Add both files to run a pass:{' '}
-            <code className="font-mono text-[11px]">{PERSONA_FILES[0]}</code> and{' '}
-            <code className="font-mono text-[11px]">{PERSONA_FILES[1]}</code>.
+            This scope needs{' '}
+            {missingForScope.map((role, i) => (
+              <span key={role}>
+                {i > 0 && ' and '}
+                <code className="font-mono text-[11px]">{PERSONA_FILE_BY_ROLE[role]}</code>
+              </span>
+            ))}
+            . Add {missingForScope.length > 1 ? 'them' : 'it'} to run, or pick a different scope.
           </p>
         </div>
       )}
 
-      {passes.length === 0 && !missingPersonas && (
+      {passes.length === 0 && canPlan && (
         <p className="text-sm text-muted-foreground">No planning passes yet — run the first one.</p>
       )}
 
@@ -622,7 +662,11 @@ function DiscussDrawer({
           </button>
         </div>
       </div>
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div ref={scrollRef} className="flex flex-1 flex-col overflow-y-auto p-4">
+        {/* mt-auto anchors the conversation to the bottom (next to the input) so an
+            empty/short chat doesn't leave a void in the middle; it collapses to 0
+            once the messages overflow and the area scrolls normally. */}
+        <div className="mt-auto space-y-3">
         {messages.length === 0 && (
           <p className="text-xs text-muted-foreground">
             Challenge the proposal, ask for evidence from the code, or request changes — agreed
@@ -648,6 +692,7 @@ function DiscussDrawer({
           )
         )}
         {thinking && <p className="text-xs text-muted-foreground">Thinking…</p>}
+        </div>
       </div>
       <div className="border-t border-border p-3">
         <textarea

@@ -96,8 +96,11 @@ export async function getPlanning(repoId: string): Promise<PlanningData> {
   return (await res.json()) as PlanningData;
 }
 
-export function startPlanningPass(repoId: string): Promise<void> {
-  return post(`/api/planning/start${repoQuery(repoId)}`);
+export type PlanningRole = 'engineer' | 'pm';
+
+/** Run a planning pass. Omit roles for the full PE + PM pass, or pass a single role. */
+export function startPlanningPass(repoId: string, roles?: PlanningRole[]): Promise<void> {
+  return post(`/api/planning/start${repoQuery(repoId)}`, roles ? { roles } : undefined);
 }
 
 /** null = manual only; otherwise auto-run every N hours. */
