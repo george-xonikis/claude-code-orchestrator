@@ -95,6 +95,18 @@ function toIssue(json: IssueJson): GitHubIssue {
 }
 
 /** List all open issues. */
+/** True if the issue is closed (PR merged auto-closes it) or no longer exists. */
+export async function issueIsClosed(repoPath: string, issueNumber: number): Promise<boolean> {
+  try {
+    const stdout = await gh(repoPath, ['issue', 'view', String(issueNumber), '--json', 'state']);
+    const { state } = JSON.parse(stdout) as { state: string };
+    return state.toUpperCase() === 'CLOSED';
+  } catch {
+    // Not found / gone — treat as closed so the stale task gets cleaned up.
+    return true;
+  }
+}
+
 export async function listOpenIssues(repoPath: string): Promise<GitHubIssue[]> {
   const stdout = await gh(repoPath, [
     'issue',

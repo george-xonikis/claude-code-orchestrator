@@ -151,6 +151,13 @@ function handleSessionEvent(event: sessions.SessionEvent): void {
       });
       if (prev?.status !== merged.status) {
         await onStatusChange(repo, issueNumber, merged);
+        // A finished session (committed/pr_open/failed) frees a slot — refill
+        // auto-pickup immediately instead of waiting for the next poll tick.
+        if (['committed', 'pr_open', 'failed'].includes(merged.status)) {
+          await autoStart(repo, repoLoop(repo.id)).catch((err) =>
+            logError(`auto-pickup after ${repo.name}#${issueNumber}`, err)
+          );
+        }
       }
     }
   })().catch((err) =>
@@ -256,13 +263,20 @@ async function poll(repo: RepoInfo): Promise<void> {
       }
     }
 
-    // 1b. Prune ready tasks no longer discovered (issue closed or converted).
-    // Nothing is invested in them.
+    // 1b. Prune tasks whose issue is no longer open — it was closed or, for a
+    // pr_open task, its PR merged (our PR bodies "Closes #N" auto-close it).
+    // Skip live sessions (working/needs_input) so an in-flight agent is never
+    // dropped mid-run. For tasks with invested work (committed/pr_open/failed)
+    // confirm the issue is actually closed — the open-issue list is capped, so
+    // "not listed" alone isn't proof it's gone.
     const discovered = new Set(issues.map((i) => i.number));
     for (const task of await state.getTasks(repo.path)) {
-      if (task.status === 'ready' && !discovered.has(task.issueNumber)) {
-        await state.removeTask(repo.path, task.issueNumber);
-      }
+      const liveSession =
+        task.status === 'working' || task.status === 'needs_input' || s.active.has(task.issueNumber);
+      if (liveSession || discovered.has(task.issueNumber)) continue;
+      const gone =
+        task.status === 'ready' || (await github.issueIsClosed(repo.path, task.issueNumber));
+      if (gone) await state.removeTask(repo.path, task.issueNumber);
     }
 
     // 2. Reconcile: non-active tasks whose branch now has an open PR -> pr_open.
