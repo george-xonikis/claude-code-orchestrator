@@ -43,6 +43,10 @@ interface RepoPlanningState {
   running: boolean;
   timer: ReturnType<typeof setInterval> | null;
   armedHours: number | null;
+  /** Aborts the in-flight pass's agent queries when the developer cancels. */
+  abort: AbortController | null;
+  /** Set when the current pass was cancelled, so it's marked cancelled not failed. */
+  cancelled: boolean;
 }
 
 interface PlanningGlobal {
@@ -58,7 +62,7 @@ function planningState(repoId: string): RepoPlanningState {
   const { repos } = globalRef.__orchestratorPlanning;
   let s = repos.get(repoId);
   if (!s) {
-    s = { running: false, timer: null, armedHours: null };
+    s = { running: false, timer: null, armedHours: null, abort: null, cancelled: false };
     repos.set(repoId, s);
   }
   return s;
@@ -270,6 +274,7 @@ async function runQuery(
   extras?: {
     mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
     allowedTools?: string[];
+    abortController?: AbortController;
   },
   onEvent?: (event: LogEvent) => void
 ): Promise<string> {
@@ -284,6 +289,7 @@ async function runQuery(
       persistSession: false,
       ...(extras?.mcpServers ? { mcpServers: extras.mcpServers } : {}),
       ...(extras?.allowedTools ? { allowedTools: extras.allowedTools } : {}),
+      ...(extras?.abortController ? { abortController: extras.abortController } : {}),
     },
   });
   let result = '';
@@ -321,11 +327,17 @@ async function runPlanningAgent(
   repoPath: string,
   defFile: string,
   exclusions: string,
-  onEvent?: (event: LogEvent) => void
+  onEvent?: (event: LogEvent) => void,
+  abortController?: AbortController
 ): Promise<string> {
   const definition = await fsp.readFile(defFile, 'utf8');
   const body = definition.replace(/^---[\s\S]*?---\s*/, '');
-  return runPlanningQuery(repoPath, planningAgentPrompt(body, exclusions), undefined, onEvent);
+  return runPlanningQuery(
+    repoPath,
+    planningAgentPrompt(body, exclusions),
+    abortController ? { abortController } : undefined,
+    onEvent
+  );
 }
 
 /** Which planning agents a pass runs. */
@@ -439,6 +451,9 @@ export async function startPlanningPass(
     options.roles && options.roles.length > 0 ? options.roles : ['engineer', 'pm'];
   const personas = await requirePersonaFiles(repo, roles);
   g.running = true;
+  g.cancelled = false;
+  const abort = new AbortController();
+  g.abort = abort;
 
   const pass: PlanningPass = {
     id: `pass-${Date.now()}`,
@@ -489,7 +504,8 @@ export async function startPlanningPass(
             repo.path,
             personas[role],
             exclusions,
-            record(role)
+            record(role),
+            abort
           );
         })
       );
@@ -497,7 +513,7 @@ export async function startPlanningPass(
         await runPlanningQuery(
           repo.path,
           synthesisPrompt(reports.engineer, reports.pm, exclusions),
-          undefined,
+          { abortController: abort },
           record('synthesis')
         )
       );
@@ -518,7 +534,11 @@ export async function startPlanningPass(
       }
     } catch (err) {
       await stopFlushing();
-      const message = err instanceof Error ? err.message : String(err);
+      const message = g.cancelled
+        ? 'Cancelled by the developer'
+        : err instanceof Error
+          ? err.message
+          : String(err);
       await updatePass(repo.path, pass.id, (p) => {
         p.status = 'failed';
         p.error = message;
@@ -526,10 +546,23 @@ export async function startPlanningPass(
       }).catch(() => {});
     } finally {
       g.running = false;
+      g.abort = null;
     }
   })();
 
   return pass.id;
+}
+
+/**
+ * Cancel the in-flight planning pass for a repo: abort its agent queries and
+ * let the running task mark the pass failed ("Cancelled by the developer").
+ * No-op error if nothing is running.
+ */
+export function cancelPlanningPass(repo: RepoInfo): void {
+  const g = planningState(repo.id);
+  if (!g.running || !g.abort) throw new Error('No planning pass is running');
+  g.cancelled = true;
+  g.abort.abort();
 }
 
 /** File the selected pending proposals as GitHub issues (label: proposed). */

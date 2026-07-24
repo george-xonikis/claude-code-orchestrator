@@ -20,6 +20,7 @@ import type { PlanningLogLine, PlanningPass, PlanningProposal } from '@/lib/type
 import { ClaudeLogo } from '@/components/shared/claude-logo';
 import { LabelChip } from '@/components/shared/label-chip';
 import {
+  cancelPlanningPass,
   clearProposalDiscussion,
   discussProposal,
   dismissPlanningProposals,
@@ -311,6 +312,7 @@ export function PlanningPage() {
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [scope, setScope] = useState<PlanScope>('both');
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
     null
@@ -383,6 +385,15 @@ export function PlanningPage() {
       .finally(() => setBusy(false));
   };
 
+  const handleCancel = () => {
+    if (!repoId) return;
+    setCancelling(true);
+    cancelPlanningPass(repoId)
+      .then(refresh)
+      .catch(() => {})
+      .finally(() => setCancelling(false));
+  };
+
   const act = (
     action: (repoId: string, passId: string, ids: string[]) => Promise<void>,
     pass: PlanningPass,
@@ -443,18 +454,20 @@ export function PlanningPage() {
               </option>
             ))}
           </select>
-          <select
-            value={scope}
-            onChange={(event) => setScope(event.target.value as PlanScope)}
-            aria-label="Planning scope"
-            className="h-8 rounded-md border border-border bg-elevated-secondary px-2 text-xs font-medium outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
-          >
-            {PLAN_SCOPES.map(({ value, label }) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+          {!running && (
+            <select
+              value={scope}
+              onChange={(event) => setScope(event.target.value as PlanScope)}
+              aria-label="Planning scope"
+              className="h-8 rounded-md border border-border bg-elevated-secondary px-2 text-xs font-medium outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
+            >
+              {PLAN_SCOPES.map(({ value, label }) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             disabled={busy || running || !canPlan}
@@ -464,6 +477,17 @@ export function PlanningPage() {
             <Sparkles className="h-3.5 w-3.5" />
             {running ? 'Planning…' : 'Plan'}
           </button>
+          {running && (
+            <button
+              type="button"
+              disabled={cancelling}
+              onClick={handleCancel}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-xs font-medium hover:bg-background-hover disabled:opacity-50"
+            >
+              <X className="h-3.5 w-3.5" />
+              {cancelling ? 'Cancelling…' : 'Cancel'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -525,9 +549,12 @@ export function PlanningPage() {
                 Engineer and PM agents are scanning the repo — this takes a few minutes…
               </p>
             )}
-            {pass.status === 'failed' && (
-              <p className="mb-2 text-sm text-destructive">Pass failed: {pass.error}</p>
-            )}
+            {pass.status === 'failed' &&
+              (pass.error?.startsWith('Cancelled') ? (
+                <p className="mb-2 text-sm text-muted-foreground">Pass cancelled</p>
+              ) : (
+                <p className="mb-2 text-sm text-destructive">Pass failed: {pass.error}</p>
+              ))}
             <PassLog logs={pass.logs ?? []} running={pass.status === 'running'} />
             <div className="flex flex-col gap-2">
               {pass.proposals.map((proposal) => (

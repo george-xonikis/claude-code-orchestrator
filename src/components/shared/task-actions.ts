@@ -103,6 +103,11 @@ export function startPlanningPass(repoId: string, roles?: PlanningRole[]): Promi
   return post(`/api/planning/start${repoQuery(repoId)}`, roles ? { roles } : undefined);
 }
 
+/** Abort the in-flight planning pass for a repo. */
+export function cancelPlanningPass(repoId: string): Promise<void> {
+  return post(`/api/planning/cancel${repoQuery(repoId)}`);
+}
+
 /** null = manual only; otherwise auto-run every N hours. */
 export function setPlanningInterval(repoId: string, hours: number | null): Promise<void> {
   return post(`/api/planning/interval${repoQuery(repoId)}`, { hours });
