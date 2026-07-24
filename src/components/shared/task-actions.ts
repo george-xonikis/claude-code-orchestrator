@@ -108,28 +108,53 @@ export function cancelPlanningPass(repoId: string): Promise<void> {
   return post(`/api/planning/cancel${repoQuery(repoId)}`);
 }
 
-/** null = manual only; otherwise auto-run every N hours. */
-export function setPlanningInterval(repoId: string, hours: number | null): Promise<void> {
-  return post(`/api/planning/interval${repoQuery(repoId)}`, { hours });
-}
+/** Max focus topics a plan may be steered toward (mirrors the server constant). */
+export const MAX_PLANNING_TOPICS = 3;
 
-export interface AutonomyConfig {
-  /** Master switch: scheduled passes auto-file proposals and the loop auto-starts sessions. */
-  autonomous: boolean;
+export interface PlanningConfig {
+  /** Auto-run every N hours; null = manual only. */
+  intervalHours: number | null;
+  /** Which agents scheduled/auto passes run. */
+  roles: PlanningRole[];
+  /** Auto-file a scheduled pass's top proposals as issues. */
+  autoFile: boolean;
+  /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
+  autoStart: boolean;
   /** Max concurrent agent sessions the loop may auto-start. */
   maxActive: number;
   /** Max top-ranked proposals a scheduled pass auto-files per run. */
   maxAutoFile: number;
+  /** Max proposals a pass produces. */
+  maxProposals: number;
+  /** Only surface proposals with impact >= this (1-5). */
+  minImpact: number;
+  /** Only surface proposals with effort <= this (1-5). */
+  maxEffort: number;
+  /** Free-text focus topics steering the plan (<= MAX_PLANNING_TOPICS). */
+  topics: string[];
 }
 
-export async function getAutonomy(repoId: string): Promise<AutonomyConfig> {
-  const res = await fetch(`/api/planning/autonomy${repoQuery(repoId)}`);
-  if (!res.ok) throw new Error(`GET /api/planning/autonomy failed with ${res.status}`);
-  return (await res.json()) as AutonomyConfig;
+export async function getPlanningConfig(repoId: string): Promise<PlanningConfig> {
+  const res = await fetch(`/api/planning/config${repoQuery(repoId)}`);
+  if (!res.ok) throw new Error(`GET /api/planning/config failed with ${res.status}`);
+  return (await res.json()) as PlanningConfig;
 }
 
-export function setAutonomy(repoId: string, patch: Partial<AutonomyConfig>): Promise<void> {
-  return post(`/api/planning/autonomy${repoQuery(repoId)}`, patch);
+/** Patch the config; the server validates/clamps and returns the saved config. */
+export async function setPlanningConfig(
+  repoId: string,
+  patch: Partial<PlanningConfig>
+): Promise<PlanningConfig> {
+  const res = await fetch(`/api/planning/config${repoQuery(repoId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `POST /api/planning/config failed with ${res.status}`);
+  }
+  return (await res.json()) as PlanningConfig;
 }
 
 export interface TicketSettings {

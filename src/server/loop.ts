@@ -1,6 +1,6 @@
 import type { RepoInfo, Task } from '@/lib/types';
 import * as github from './github';
-import { getAutonomyConfig } from './planning';
+import { getPlanningConfig } from './planning';
 import { loadRepos } from './repos';
 import * as sessions from './sessions';
 import * as state from './state';
@@ -304,8 +304,8 @@ async function poll(repo: RepoInfo): Promise<void> {
  */
 async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
   if (!repo.htmlUrl) return;
-  const { autonomous, maxActive } = await getAutonomyConfig(repo);
-  if (!autonomous || s.active.size >= maxActive) return;
+  const { autoStart: enabled, maxActive } = await getPlanningConfig(repo);
+  if (!enabled || s.active.size >= maxActive) return;
 
   for (const task of await state.getTasks(repo.path)) {
     if (s.active.size >= maxActive) break;

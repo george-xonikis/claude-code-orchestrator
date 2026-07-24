@@ -19,7 +19,7 @@ export {
 } from './implementation-session';
 export { planningAgentPrompt } from './planning-agent';
 export { exclusionDigest } from './planning-exclusions';
-export { synthesisPrompt } from './planning-synthesis';
+export { synthesisPrompt, type ProposalShaping } from './planning-synthesis';
 export {
   discussionPrompt,
   UPDATE_PROPOSAL_TOOL_DESCRIPTION,

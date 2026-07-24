@@ -17,7 +17,7 @@ type Theme = 'light' | 'dark';
 const NAV_ITEMS = [
   { href: '/', label: 'Board' },
   { href: '/planning', label: 'Planning' },
-  { href: '/settings', label: 'Goal' },
+  { href: '/preferences', label: 'Preferences' },
 ] as const;
 
 /** The <html data-theme> attribute is the source of truth (set pre-paint by the init script). */

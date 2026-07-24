@@ -4,10 +4,42 @@
  * (title, body with fixed sections, labels, source, effort 1-5, impact 1-5).
  */
 
+/** Config-driven steering applied to a planning pass's output. */
+export interface ProposalShaping {
+  /** Free-text focus topics; empty = no topic constraint. */
+  topics: string[];
+  /** Only keep proposals with impact >= this (1-5; 1 = no floor). */
+  minImpact: number;
+  /** Only keep proposals with effort <= this (1-5; 5 = no ceiling). */
+  maxEffort: number;
+  /** Max proposals to return. */
+  maxProposals: number;
+}
+
+/** Human-readable constraint lines for the active parts of a shaping config. */
+function shapingConstraints(shaping: ProposalShaping): string[] {
+  const lines: string[] = [];
+  if (shaping.topics.length > 0) {
+    lines.push(
+      `- FOCUS: only propose work related to these topics — ${shaping.topics.join(
+        ', '
+      )}. Drop anything unrelated, even if otherwise valuable.`
+    );
+  }
+  if (shaping.minImpact > 1) {
+    lines.push(`- Drop any item with impact below ${shaping.minImpact} (1-5 scale).`);
+  }
+  if (shaping.maxEffort < 5) {
+    lines.push(`- Drop any item with effort above ${shaping.maxEffort} (1-5 scale).`);
+  }
+  return lines;
+}
+
 export function synthesisPrompt(
   engineerReport: string,
   pmReport: string,
-  exclusions: string
+  exclusions: string,
+  shaping: ProposalShaping
 ): string {
   return [
     'You are the synthesis step of a planning meeting between a Principal',
@@ -20,7 +52,8 @@ export function synthesisPrompt(
     '  with source "both", combining the PM problem/outcome framing with the',
     "  engineer's code anchors.",
     '- Drop anything that serves no stated goal priority.',
-    '- Keep at most 9 items, ranked by leverage.',
+    `- Keep at most ${shaping.maxProposals} items, ranked by leverage.`,
+    ...shapingConstraints(shaping),
     ...(exclusions
       ? [
           '- BACKSTOP: drop any item matching the previously-proposed list below,',

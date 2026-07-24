@@ -11,6 +11,7 @@ import {
   discussionPrompt,
   exclusionDigest,
   planningAgentPrompt,
+  type ProposalShaping,
   synthesisPrompt,
   UPDATE_PROPOSAL_TOOL_DESCRIPTION,
 } from './prompts';
@@ -72,40 +73,112 @@ function planningState(repoId: string): RepoPlanningState {
 // Store
 // ---------------------------------------------------------------------------
 
-interface PlanningStore {
+/** Which planning agents a pass runs. */
+export type PlanningRole = 'engineer' | 'pm';
+
+/** Max focus topics a plan may be steered toward. */
+export const MAX_PLANNING_TOPICS = 3;
+
+/**
+ * Per-repo planning configuration — every knob is independent.
+ * Persisted in planning.json alongside the passes.
+ */
+export interface PlanningConfig {
   /** Auto-run every N hours; null = manual only. */
   intervalHours: number | null;
-  /** Autonomous mode: scheduled passes auto-file proposals and the loop auto-starts sessions. */
-  autonomous: boolean;
-  /** Max concurrent agent sessions the loop may auto-start (opt-in cap). */
+  /** Which agents scheduled/auto passes run (manual runs pass their own scope). */
+  roles: PlanningRole[];
+  /** Auto-file a scheduled pass's top proposals as issues. */
+  autoFile: boolean;
+  /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
+  autoStart: boolean;
+  /** Max concurrent agent sessions the loop may auto-start. */
   maxActive: number;
   /** Max top-ranked proposals a scheduled pass may auto-file per run. */
   maxAutoFile: number;
+  /** Max proposals a pass produces (synthesis cap). */
+  maxProposals: number;
+  /** Only surface proposals with impact >= this (1-5; 1 = no floor). */
+  minImpact: number;
+  /** Only surface proposals with effort <= this (1-5; 5 = no ceiling). */
+  maxEffort: number;
+  /** Free-text focus topics to steer the plan toward (<= MAX_PLANNING_TOPICS). */
+  topics: string[];
+}
+
+interface PlanningStore extends PlanningConfig {
   passes: PlanningPass[];
 }
 
-/** Autonomy defaults — off, with conservative caps to bound unattended cost. */
-const AUTONOMY_DEFAULTS = { autonomous: false, maxActive: 2, maxAutoFile: 3 } as const;
+/** Config defaults — automation off, mid impact/effort thresholds, no topic focus. */
+const CONFIG_DEFAULTS: PlanningConfig = {
+  intervalHours: null,
+  roles: ['engineer', 'pm'],
+  autoFile: false,
+  autoStart: false,
+  maxActive: 2,
+  maxAutoFile: 3,
+  maxProposals: 9,
+  minImpact: 3,
+  maxEffort: 3,
+  topics: [],
+};
+
+const clampInt = (value: unknown, min: number, max: number, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(min, Math.min(max, Math.round(value)))
+    : fallback;
+
+/** Keep only valid, de-duplicated roles; fall back to both if none survive. */
+function sanitizeRoles(value: unknown): PlanningRole[] {
+  if (!Array.isArray(value)) return [...CONFIG_DEFAULTS.roles];
+  const roles = [...new Set(value)].filter(
+    (r): r is PlanningRole => r === 'engineer' || r === 'pm'
+  );
+  return roles.length > 0 ? roles : [...CONFIG_DEFAULTS.roles];
+}
+
+/** Trim, drop blanks, de-dupe, and cap the topic list. */
+function sanitizeTopics(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const topics: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim().slice(0, 60);
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    topics.push(trimmed);
+    if (topics.length >= MAX_PLANNING_TOPICS) break;
+  }
+  return topics;
+}
 
 async function loadStore(repoPath: string): Promise<PlanningStore> {
   try {
     const raw = await fsp.readFile(planningFile(repoPath), 'utf8');
-    const parsed = JSON.parse(raw) as {
-      intervalHours?: number | null;
+    const parsed = JSON.parse(raw) as Partial<PlanningConfig> & {
+      /** Legacy single master toggle — migrated to autoFile + autoStart. */
       autonomous?: boolean;
-      maxActive?: number;
-      maxAutoFile?: number;
       passes?: PlanningPass[];
     };
+    const legacyAutonomous = parsed.autonomous ?? false;
     return {
       intervalHours: parsed.intervalHours ?? null,
-      autonomous: parsed.autonomous ?? AUTONOMY_DEFAULTS.autonomous,
-      maxActive: parsed.maxActive ?? AUTONOMY_DEFAULTS.maxActive,
-      maxAutoFile: parsed.maxAutoFile ?? AUTONOMY_DEFAULTS.maxAutoFile,
+      roles: sanitizeRoles(parsed.roles),
+      autoFile: parsed.autoFile ?? legacyAutonomous,
+      autoStart: parsed.autoStart ?? legacyAutonomous,
+      maxActive: clampInt(parsed.maxActive, 1, 10, CONFIG_DEFAULTS.maxActive),
+      maxAutoFile: clampInt(parsed.maxAutoFile, 0, 9, CONFIG_DEFAULTS.maxAutoFile),
+      maxProposals: clampInt(parsed.maxProposals, 1, 20, CONFIG_DEFAULTS.maxProposals),
+      minImpact: clampInt(parsed.minImpact, 1, 5, CONFIG_DEFAULTS.minImpact),
+      maxEffort: clampInt(parsed.maxEffort, 1, 5, CONFIG_DEFAULTS.maxEffort),
+      topics: sanitizeTopics(parsed.topics),
       passes: parsed.passes ?? [],
     };
   } catch {
-    return { intervalHours: null, ...AUTONOMY_DEFAULTS, passes: [] };
+    return { ...CONFIG_DEFAULTS, passes: [] };
   }
 }
 
@@ -157,44 +230,41 @@ export async function ensurePlanningScheduler(repo: RepoInfo): Promise<void> {
   }
 }
 
-export async function setPlanningInterval(
-  repo: RepoInfo,
-  hours: number | null
-): Promise<void> {
-  const store = await loadStore(repo.path);
-  store.intervalHours = hours;
-  await saveStore(repo.path, store);
-  await ensurePlanningScheduler(repo);
-}
-
 // ---------------------------------------------------------------------------
-// Autonomous mode config (read by the orchestrator loop for auto-start)
+// Planning config (independent knobs; read by the loop for auto-start)
 // ---------------------------------------------------------------------------
 
-export interface AutonomyConfig {
-  autonomous: boolean;
-  maxActive: number;
-  maxAutoFile: number;
+/** Per-repo planning config, with defaults filled in. */
+export async function getPlanningConfig(repo: RepoInfo): Promise<PlanningConfig> {
+  const { passes: _passes, ...config } = await loadStore(repo.path);
+  void _passes;
+  return config;
 }
 
-/** Per-repo autonomy settings, with defaults filled in. */
-export async function getAutonomyConfig(repo: RepoInfo): Promise<AutonomyConfig> {
-  const { autonomous, maxActive, maxAutoFile } = await loadStore(repo.path);
-  return { autonomous, maxActive, maxAutoFile };
-}
-
-/** Patch autonomy settings; numbers are clamped to sane bounds. */
-export async function setAutonomyConfig(
+/** Patch planning config; values are validated/clamped and the scheduler re-armed. */
+export async function setPlanningConfig(
   repo: RepoInfo,
-  patch: Partial<AutonomyConfig>
+  patch: Partial<PlanningConfig>
 ): Promise<void> {
   const store = await loadStore(repo.path);
-  if (patch.autonomous !== undefined) store.autonomous = patch.autonomous;
-  if (patch.maxActive !== undefined) store.maxActive = Math.max(1, Math.min(10, Math.round(patch.maxActive)));
-  if (patch.maxAutoFile !== undefined) {
-    store.maxAutoFile = Math.max(0, Math.min(9, Math.round(patch.maxAutoFile)));
-  }
+  const intervalChanged =
+    patch.intervalHours !== undefined && patch.intervalHours !== store.intervalHours;
+
+  if (patch.intervalHours !== undefined) store.intervalHours = patch.intervalHours;
+  if (patch.roles !== undefined) store.roles = sanitizeRoles(patch.roles);
+  if (patch.autoFile !== undefined) store.autoFile = patch.autoFile;
+  if (patch.autoStart !== undefined) store.autoStart = patch.autoStart;
+  if (patch.maxActive !== undefined) store.maxActive = clampInt(patch.maxActive, 1, 10, store.maxActive);
+  if (patch.maxAutoFile !== undefined)
+    store.maxAutoFile = clampInt(patch.maxAutoFile, 0, 9, store.maxAutoFile);
+  if (patch.maxProposals !== undefined)
+    store.maxProposals = clampInt(patch.maxProposals, 1, 20, store.maxProposals);
+  if (patch.minImpact !== undefined) store.minImpact = clampInt(patch.minImpact, 1, 5, store.minImpact);
+  if (patch.maxEffort !== undefined) store.maxEffort = clampInt(patch.maxEffort, 1, 5, store.maxEffort);
+  if (patch.topics !== undefined) store.topics = sanitizeTopics(patch.topics);
+
   await saveStore(repo.path, store);
+  if (intervalChanged) await ensurePlanningScheduler(repo);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +397,7 @@ async function runPlanningAgent(
   repoPath: string,
   defFile: string,
   exclusions: string,
+  shaping: ProposalShaping,
   onEvent?: (event: LogEvent) => void,
   abortController?: AbortController
 ): Promise<string> {
@@ -334,14 +405,11 @@ async function runPlanningAgent(
   const body = definition.replace(/^---[\s\S]*?---\s*/, '');
   return runPlanningQuery(
     repoPath,
-    planningAgentPrompt(body, exclusions),
+    planningAgentPrompt(body, exclusions, shaping),
     abortController ? { abortController } : undefined,
     onEvent
   );
 }
-
-/** Which planning agents a pass runs. */
-export type PlanningRole = 'engineer' | 'pm';
 
 /**
  * The persona files for the requested roles must exist before a pass can run.
@@ -447,8 +515,16 @@ export async function startPlanningPass(
 ): Promise<string> {
   const g = planningState(repo.id);
   if (g.running) throw new Error('A planning pass is already running');
+  const store = await loadStore(repo.path);
+  // Manual runs pass an explicit scope; scheduled/auto runs use the config roles.
   const roles: PlanningRole[] =
-    options.roles && options.roles.length > 0 ? options.roles : ['engineer', 'pm'];
+    options.roles && options.roles.length > 0 ? options.roles : store.roles;
+  const shaping: ProposalShaping = {
+    topics: store.topics,
+    minImpact: store.minImpact,
+    maxEffort: store.maxEffort,
+    maxProposals: store.maxProposals,
+  };
   const personas = await requirePersonaFiles(repo, roles);
   g.running = true;
   g.cancelled = false;
@@ -461,7 +537,6 @@ export async function startPlanningPass(
     status: 'running',
     proposals: [],
   };
-  const store = await loadStore(repo.path);
   // Digest of prior proposals (before this pass) so agents skip re-proposing them.
   const exclusions = exclusionDigest(store.passes);
   store.passes.unshift(pass);
@@ -504,6 +579,7 @@ export async function startPlanningPass(
             repo.path,
             personas[role],
             exclusions,
+            shaping,
             record(role),
             abort
           );
@@ -512,7 +588,7 @@ export async function startPlanningPass(
       const proposals = parseProposals(
         await runPlanningQuery(
           repo.path,
-          synthesisPrompt(reports.engineer, reports.pm, exclusions),
+          synthesisPrompt(reports.engineer, reports.pm, exclusions, shaping),
           { abortController: abort },
           record('synthesis')
         )
@@ -589,14 +665,14 @@ export async function fileProposals(
 }
 
 /**
- * Autonomous mode: file the top-N pending proposals of a just-completed pass as
- * issues (ranked order — synthesis already sorts by leverage). Reuses the same
+ * Auto-file the top-N pending proposals of a just-completed pass as issues
+ * (ranked order — synthesis already sorts by leverage). Reuses the same
  * `fileProposals` path (label `proposed`), and future passes' exclusion digest
  * skips already-filed titles, so this cannot re-file the same work each run.
  */
 async function autoFileTopProposals(repo: RepoInfo, passId: string): Promise<void> {
-  const { autonomous, maxAutoFile } = await getAutonomyConfig(repo);
-  if (!autonomous || maxAutoFile <= 0) return;
+  const { autoFile, maxAutoFile } = await getPlanningConfig(repo);
+  if (!autoFile || maxAutoFile <= 0) return;
   const store = await loadStore(repo.path);
   const pass = store.passes.find((p) => p.id === passId);
   if (!pass) return;

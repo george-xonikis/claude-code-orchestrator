@@ -1,14 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import {
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
-  DollarSign,
-  Hammer,
-  Sparkles,
+  SlidersHorizontal,
   Trash2,
   X,
 } from 'lucide-react';
@@ -18,7 +17,9 @@ import remarkGfm from 'remark-gfm';
 
 import type { PlanningLogLine, PlanningPass, PlanningProposal } from '@/lib/types';
 import { ClaudeLogo } from '@/components/shared/claude-logo';
+import { EFFORT_METER, GradeMeter, IMPACT_METER } from '@/components/shared/grade-meter';
 import { LabelChip } from '@/components/shared/label-chip';
+import { MarkdownEditorSection } from '@/components/shared/markdown-editor-section';
 import {
   cancelPlanningPass,
   clearProposalDiscussion,
@@ -27,8 +28,11 @@ import {
   type DiscussionMessage,
   filePlanningProposals,
   getPlanning,
+  getPlanningConfig,
+  getSettings,
+  type PlanningConfig,
   type PlanningRole,
-  setPlanningInterval,
+  saveSettings,
   startPlanningPass,
 } from '@/components/shared/task-actions';
 import { useRepo } from '@/components/shared/use-repo';
@@ -38,24 +42,6 @@ const PERSONA_FILE_BY_ROLE: Record<PlanningRole, string> = {
   engineer: '.claude/agents/principal-engineer.md',
   pm: '.claude/agents/product-manager.md',
 };
-
-/** Which agents a "Plan" click runs. */
-const PLAN_SCOPES = [
-  { value: 'both', label: 'PE + PM', roles: ['engineer', 'pm'] as PlanningRole[] },
-  { value: 'engineer', label: 'PE only', roles: ['engineer'] as PlanningRole[] },
-  { value: 'pm', label: 'PM only', roles: ['pm'] as PlanningRole[] },
-] as const;
-
-type PlanScope = (typeof PLAN_SCOPES)[number]['value'];
-
-const INTERVAL_OPTIONS = [
-  { value: '', label: 'Auto-run: off' },
-  { value: '1', label: 'Every hour' },
-  { value: '2', label: 'Every 2 hours' },
-  { value: '4', label: 'Every 4 hours' },
-  { value: '8', label: 'Every 8 hours' },
-  { value: '24', label: 'Every 24 hours' },
-] as const;
 
 const SOURCE_BADGE: Record<PlanningProposal['source'], { label: string; className: string }> = {
   engineer: { label: 'PE', className: 'bg-info-muted text-info' },
@@ -78,34 +64,6 @@ function toGrade(value?: string): number | null {
     return Math.max(1, Math.min(5, Math.round(numeric)));
   }
   return GRADE_ALIASES[trimmed.toLowerCase()] ?? null;
-}
-
-/** A 1-5 rating rendered as five icons, `grade` of them filled. */
-function GradeMeter({
-  icon: Icon,
-  grade,
-  label,
-  filledClassName,
-}: {
-  icon: typeof DollarSign;
-  grade: number;
-  label: string;
-  filledClassName: string;
-}) {
-  return (
-    <span
-      title={`${label} ${grade}/5`}
-      aria-label={`${label} ${grade} out of 5`}
-      className="inline-flex items-center gap-0.5 rounded-full bg-secondary px-2 py-1"
-    >
-      {Array.from({ length: 5 }).map((_, i) => (
-        <Icon
-          key={i}
-          className={`h-3 w-3 ${i < grade ? filledClassName : 'text-muted-foreground/25'}`}
-        />
-      ))}
-    </span>
-  );
 }
 
 function ProposalCard({
@@ -167,20 +125,10 @@ function ProposalCard({
               <LabelChip key={label} label={label} />
             ))}
             {toGrade(proposal.effort) !== null && (
-              <GradeMeter
-                icon={Hammer}
-                grade={toGrade(proposal.effort) as number}
-                label="Effort"
-                filledClassName="text-warning"
-              />
+              <GradeMeter style={EFFORT_METER} grade={toGrade(proposal.effort) as number} />
             )}
             {toGrade(proposal.impact) !== null && (
-              <GradeMeter
-                icon={DollarSign}
-                grade={toGrade(proposal.impact) as number}
-                label="Impact"
-                filledClassName="text-success"
-              />
+              <GradeMeter style={IMPACT_METER} grade={toGrade(proposal.impact) as number} />
             )}
             {proposal.status === 'filed' && proposal.issueUrl && (
               <a
@@ -308,12 +256,12 @@ export function PlanningPage() {
   const { current, loaded: reposLoaded } = useRepo();
   const repoId = current?.id ?? null;
   const [passes, setPasses] = useState<PlanningPass[]>([]);
-  const [intervalHours, setIntervalHours] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const [scope, setScope] = useState<PlanScope>('both');
+  const [config, setConfig] = useState<PlanningConfig | null>(null);
+  const [goal, setGoal] = useState('');
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
     null
   );
@@ -321,20 +269,24 @@ export function PlanningPage() {
   const refresh = useCallback(() => {
     if (!repoId) return;
     getPlanning(repoId)
-      .then((data) => {
-        setPasses(data.passes);
-        setIntervalHours(data.intervalHours);
-      })
+      .then((data) => setPasses(data.passes))
       .catch(() => {})
       .finally(() => setLoaded(true));
   }, [repoId]);
 
-  const handleIntervalChange = (value: string) => {
+  // Config drives which agents a Plan run uses and the missing-persona gating.
+  const loadConfig = useCallback(() => {
     if (!repoId) return;
-    const hours = value === '' ? null : Number(value);
-    setIntervalHours(hours); // optimistic
-    setPlanningInterval(repoId, hours).catch(() => {});
-  };
+    getPlanningConfig(repoId).then(setConfig).catch(() => {});
+  }, [repoId]);
+
+  // The project goal steers planning, so it's editable right here on the view.
+  const loadGoal = useCallback(() => {
+    if (!repoId) return;
+    getSettings(repoId)
+      .then((s) => setGoal(s.goal))
+      .catch(() => {});
+  }, [repoId]);
 
   // Reset during render when the selected repo changes (React's derived-state
   // pattern), so the effect below only refetches.
@@ -342,13 +294,16 @@ export function PlanningPage() {
   if (loadedRepoId !== repoId) {
     setLoadedRepoId(repoId);
     setPasses([]);
-    setIntervalHours(null);
     setSelected(new Set());
     setDiscussing(null);
+    setConfig(null);
+    setGoal('');
     setLoaded(false);
   }
 
   useEffect(refresh, [refresh]);
+  useEffect(loadConfig, [loadConfig]);
+  useEffect(loadGoal, [loadGoal]);
 
   const latest = passes[0];
   const running = latest?.status === 'running';
@@ -374,12 +329,14 @@ export function PlanningPage() {
   const selectedIdsIn = (pass: PlanningPass) =>
     pass.proposals.filter((p) => selected.has(`${pass.id}:${p.id}`)).map((p) => p.id);
 
-  const scopeRoles = PLAN_SCOPES.find((s) => s.value === scope)!.roles;
+  // Agents a Plan run uses come from the config (default both until it loads);
+  // passing none lets the server fall back to the configured roles.
+  const configRoles: PlanningRole[] = config?.roles ?? ['engineer', 'pm'];
 
   const handleStart = () => {
     if (!repoId) return;
     setBusy(true);
-    startPlanningPass(repoId, scopeRoles)
+    startPlanningPass(repoId)
       .then(refresh)
       .catch(() => {})
       .finally(() => setBusy(false));
@@ -428,12 +385,12 @@ export function PlanningPage() {
   }
 
   // Per-role persona presence (falls back to hasPersonas if the granular flag
-  // isn't on the repo yet), gated to the roles the chosen scope will run.
+  // isn't on the repo yet), gated to the agents the config will run.
   const personas = current?.personas ?? {
     engineer: current?.hasPersonas ?? false,
     pm: current?.hasPersonas ?? false,
   };
-  const missingForScope = scopeRoles.filter((role) => !personas[role]);
+  const missingForScope = configRoles.filter((role) => !personas[role]);
   const canPlan = missingForScope.length === 0;
 
   return (
@@ -442,39 +399,21 @@ export function PlanningPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-sm font-bold">Planning</h1>
         <div className="flex shrink-0 items-center gap-2">
-          <select
-            value={intervalHours === null ? '' : String(intervalHours)}
-            onChange={(event) => handleIntervalChange(event.target.value)}
-            aria-label="Auto-run interval"
-            className="h-8 rounded-md border border-border bg-elevated-secondary px-2 text-xs font-medium outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
+          <Link
+            href="/planning/config"
+            aria-label="Planning configuration"
+            title="Planning configuration"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-2.5 text-xs font-medium hover:bg-background-hover"
           >
-            {INTERVAL_OPTIONS.map(({ value, label }) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-          {!running && (
-            <select
-              value={scope}
-              onChange={(event) => setScope(event.target.value as PlanScope)}
-              aria-label="Planning scope"
-              className="h-8 rounded-md border border-border bg-elevated-secondary px-2 text-xs font-medium outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
-            >
-              {PLAN_SCOPES.map(({ value, label }) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          )}
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            Config
+          </Link>
           <button
             type="button"
             disabled={busy || running || !canPlan}
             onClick={handleStart}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            className="inline-flex h-8 items-center rounded-md bg-primary px-4 text-xs font-semibold tracking-wide text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
-            <Sparkles className="h-3.5 w-3.5" />
             {running ? 'Planning…' : 'Plan'}
           </button>
           {running && (
@@ -491,20 +430,30 @@ export function PlanningPage() {
         </div>
       </div>
 
+      <MarkdownEditorSection
+        title="Goal"
+        description="Steers this planning view and every agent session — vision, current priorities, what “done well” means. Stored in .orchestrator/goal.md."
+        value={goal}
+        minHeightClass="min-h-32 max-h-[28rem]"
+        placeholder="e.g. Nous is a knowledge platform for SMEs. Current priority: …"
+        onChange={setGoal}
+        onSave={() => (repoId ? saveSettings(repoId, { goal }) : Promise.resolve())}
+      />
+
       {missingForScope.length > 0 && (
         <div className="rounded-lg bg-warning-muted px-4 py-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-warning">
             Planning persona{missingForScope.length > 1 ? 's' : ''} missing
           </div>
           <p className="mt-1 text-sm leading-snug">
-            This scope needs{' '}
+            The configured agents need{' '}
             {missingForScope.map((role, i) => (
               <span key={role}>
                 {i > 0 && ' and '}
                 <code className="font-mono text-[11px]">{PERSONA_FILE_BY_ROLE[role]}</code>
               </span>
             ))}
-            . Add {missingForScope.length > 1 ? 'them' : 'it'} to run, or pick a different scope.
+            . Add {missingForScope.length > 1 ? 'them' : 'it'} to run, or change the agents in Config.
           </p>
         </div>
       )}
