@@ -71,19 +71,37 @@ function planningState(repoId: string): RepoPlanningState {
 interface PlanningStore {
   /** Auto-run every N hours; null = manual only. */
   intervalHours: number | null;
+  /** Autonomous mode: scheduled passes auto-file proposals and the loop auto-starts sessions. */
+  autonomous: boolean;
+  /** Max concurrent agent sessions the loop may auto-start (opt-in cap). */
+  maxActive: number;
+  /** Max top-ranked proposals a scheduled pass may auto-file per run. */
+  maxAutoFile: number;
   passes: PlanningPass[];
 }
+
+/** Autonomy defaults — off, with conservative caps to bound unattended cost. */
+const AUTONOMY_DEFAULTS = { autonomous: false, maxActive: 2, maxAutoFile: 3 } as const;
 
 async function loadStore(repoPath: string): Promise<PlanningStore> {
   try {
     const raw = await fsp.readFile(planningFile(repoPath), 'utf8');
     const parsed = JSON.parse(raw) as {
       intervalHours?: number | null;
+      autonomous?: boolean;
+      maxActive?: number;
+      maxAutoFile?: number;
       passes?: PlanningPass[];
     };
-    return { intervalHours: parsed.intervalHours ?? null, passes: parsed.passes ?? [] };
+    return {
+      intervalHours: parsed.intervalHours ?? null,
+      autonomous: parsed.autonomous ?? AUTONOMY_DEFAULTS.autonomous,
+      maxActive: parsed.maxActive ?? AUTONOMY_DEFAULTS.maxActive,
+      maxAutoFile: parsed.maxAutoFile ?? AUTONOMY_DEFAULTS.maxAutoFile,
+      passes: parsed.passes ?? [],
+    };
   } catch {
-    return { intervalHours: null, passes: [] };
+    return { intervalHours: null, ...AUTONOMY_DEFAULTS, passes: [] };
   }
 }
 
@@ -129,7 +147,8 @@ export async function ensurePlanningScheduler(repo: RepoInfo): Promise<void> {
   if (hours !== null) {
     g.timer = setInterval(() => {
       // startPlanningPass throws if one is already running — that skip is fine.
-      startPlanningPass(repo).catch(() => {});
+      // auto: true lets a scheduled pass auto-file proposals in autonomous mode.
+      startPlanningPass(repo, { auto: true }).catch(() => {});
     }, hours * 3_600_000);
   }
 }
@@ -142,6 +161,36 @@ export async function setPlanningInterval(
   store.intervalHours = hours;
   await saveStore(repo.path, store);
   await ensurePlanningScheduler(repo);
+}
+
+// ---------------------------------------------------------------------------
+// Autonomous mode config (read by the orchestrator loop for auto-start)
+// ---------------------------------------------------------------------------
+
+export interface AutonomyConfig {
+  autonomous: boolean;
+  maxActive: number;
+  maxAutoFile: number;
+}
+
+/** Per-repo autonomy settings, with defaults filled in. */
+export async function getAutonomyConfig(repo: RepoInfo): Promise<AutonomyConfig> {
+  const { autonomous, maxActive, maxAutoFile } = await loadStore(repo.path);
+  return { autonomous, maxActive, maxAutoFile };
+}
+
+/** Patch autonomy settings; numbers are clamped to sane bounds. */
+export async function setAutonomyConfig(
+  repo: RepoInfo,
+  patch: Partial<AutonomyConfig>
+): Promise<void> {
+  const store = await loadStore(repo.path);
+  if (patch.autonomous !== undefined) store.autonomous = patch.autonomous;
+  if (patch.maxActive !== undefined) store.maxActive = Math.max(1, Math.min(10, Math.round(patch.maxActive)));
+  if (patch.maxAutoFile !== undefined) {
+    store.maxAutoFile = Math.max(0, Math.min(9, Math.round(patch.maxAutoFile)));
+  }
+  await saveStore(repo.path, store);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,8 +422,15 @@ function parseProposals(raw: string): PlanningProposal[] {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Kick off a planning pass for a repo (engineer + PM in parallel, then synthesis). */
-export async function startPlanningPass(repo: RepoInfo): Promise<string> {
+/**
+ * Kick off a planning pass for a repo (engineer + PM in parallel, then synthesis).
+ * `auto` marks a scheduler-triggered pass: on completion, if the repo is in
+ * autonomous mode, its top-ranked proposals are auto-filed as issues.
+ */
+export async function startPlanningPass(
+  repo: RepoInfo,
+  options: { auto?: boolean } = {}
+): Promise<string> {
   const g = planningState(repo.id);
   if (g.running) throw new Error('A planning pass is already running');
   const personas = await requirePersonaFiles(repo);
@@ -438,6 +494,15 @@ export async function startPlanningPass(repo: RepoInfo): Promise<string> {
         p.proposals = proposals;
         p.logs = logs.slice();
       });
+      if (options.auto) {
+        await autoFileTopProposals(repo, pass.id).catch((err) =>
+          console.error(
+            `[orchestrator] planning: auto-file failed for ${repo.name}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          )
+        );
+      }
     } catch (err) {
       await stopFlushing();
       const message = err instanceof Error ? err.message : String(err);
@@ -475,6 +540,26 @@ export async function fileProposals(
     proposal.issueUrl = issue.url;
     await saveStore(repo.path, store); // persist after each so a mid-batch failure loses nothing
   }
+}
+
+/**
+ * Autonomous mode: file the top-N pending proposals of a just-completed pass as
+ * issues (ranked order — synthesis already sorts by leverage). Reuses the same
+ * `fileProposals` path (label `proposed`), and future passes' exclusion digest
+ * skips already-filed titles, so this cannot re-file the same work each run.
+ */
+async function autoFileTopProposals(repo: RepoInfo, passId: string): Promise<void> {
+  const { autonomous, maxAutoFile } = await getAutonomyConfig(repo);
+  if (!autonomous || maxAutoFile <= 0) return;
+  const store = await loadStore(repo.path);
+  const pass = store.passes.find((p) => p.id === passId);
+  if (!pass) return;
+  const ids = pass.proposals
+    .filter((p) => p.status === 'pending')
+    .slice(0, maxAutoFile)
+    .map((p) => p.id);
+  if (ids.length === 0) return;
+  await fileProposals(repo, passId, ids);
 }
 
 /** Dismiss the selected pending proposals. */

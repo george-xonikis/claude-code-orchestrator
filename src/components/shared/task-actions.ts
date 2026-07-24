@@ -105,6 +105,25 @@ export function setPlanningInterval(repoId: string, hours: number | null): Promi
   return post(`/api/planning/interval${repoQuery(repoId)}`, { hours });
 }
 
+export interface AutonomyConfig {
+  /** Master switch: scheduled passes auto-file proposals and the loop auto-starts sessions. */
+  autonomous: boolean;
+  /** Max concurrent agent sessions the loop may auto-start. */
+  maxActive: number;
+  /** Max top-ranked proposals a scheduled pass auto-files per run. */
+  maxAutoFile: number;
+}
+
+export async function getAutonomy(repoId: string): Promise<AutonomyConfig> {
+  const res = await fetch(`/api/planning/autonomy${repoQuery(repoId)}`);
+  if (!res.ok) throw new Error(`GET /api/planning/autonomy failed with ${res.status}`);
+  return (await res.json()) as AutonomyConfig;
+}
+
+export function setAutonomy(repoId: string, patch: Partial<AutonomyConfig>): Promise<void> {
+  return post(`/api/planning/autonomy${repoQuery(repoId)}`, patch);
+}
+
 export interface TicketSettings {
   title: string;
   body: string;

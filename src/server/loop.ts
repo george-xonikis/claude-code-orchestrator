@@ -1,5 +1,6 @@
 import type { RepoInfo, Task } from '@/lib/types';
 import * as github from './github';
+import { getAutonomyConfig } from './planning';
 import { loadRepos } from './repos';
 import * as sessions from './sessions';
 import * as state from './state';
@@ -24,6 +25,9 @@ const POLL_INTERVAL_MS = 2 * 60_000;
 
 /** Issues carrying this label must never be implemented by an agent. */
 const NON_AGENT_LABEL = /^non[- ]?agent$/i;
+
+/** In autonomous mode, only issues carrying one of these labels are auto-started. */
+const AGENT_READY_LABEL = /^(proposed|agent-ready)$/i;
 
 interface RepoLoopState {
   polling: boolean;
@@ -284,9 +288,43 @@ async function poll(repo: RepoInfo): Promise<void> {
       }
     }
 
-    // NOTE: no autonomous claiming — sessions start only from the Start button.
+    // 3. Autonomous mode (opt-in): auto-start ready issues up to the cap.
+    await autoStart(repo, s);
   } finally {
     s.polling = false;
+  }
+}
+
+/**
+ * Autonomous auto-start: while under the per-repo concurrency cap, claim ready
+ * issues labeled `proposed`/`agent-ready` (skipping `non-agent`). No-op unless
+ * the repo has autonomous mode on and a GitHub URL. `claim()` reserves the slot
+ * synchronously via `s.active.add`, so the cap is enforced across iterations.
+ * The merge gate stays human — this only takes work as far as a commit.
+ */
+async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
+  if (!repo.htmlUrl) return;
+  const { autonomous, maxActive } = await getAutonomyConfig(repo);
+  if (!autonomous || s.active.size >= maxActive) return;
+
+  for (const task of await state.getTasks(repo.path)) {
+    if (s.active.size >= maxActive) break;
+    if (task.status !== 'ready' || s.active.has(task.issueNumber)) continue;
+    const labels = task.labels ?? [];
+    if (labels.some((label) => NON_AGENT_LABEL.test(label))) continue;
+    if (!labels.some((label) => AGENT_READY_LABEL.test(label))) continue;
+    try {
+      await claim(
+        repo,
+        task.issueNumber,
+        task.title || `Issue #${task.issueNumber}`,
+        task.preferredModel,
+        task.useWorkflow ?? false
+      );
+    } catch (err) {
+      // claim() already records the failure on the task; keep polling others.
+      logError(`auto-start ${repo.name}#${task.issueNumber}`, err);
+    }
   }
 }
 
