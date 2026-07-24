@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Loader2,
   SlidersHorizontal,
   Trash2,
   X,
@@ -118,8 +119,8 @@ function ProposalCard({
           />
         )}
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold leading-snug">{proposal.title}</span>
+          <div className="text-sm font-semibold leading-snug">{proposal.title}</div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <span
               className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${source.className}`}
             >
@@ -139,9 +140,9 @@ function ProposalCard({
                 href={proposal.issueUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="text-[11px] font-medium text-success hover:underline"
+                className="text-sm font-semibold text-info hover:underline"
               >
-                filed as #{proposal.issueNumber} ↗
+                opened as #{proposal.issueNumber} ↗
               </a>
             )}
             {proposal.status === 'dismissed' && (
@@ -168,9 +169,9 @@ function ProposalCard({
           </div>
           {expanded && (
             <div className="mt-2">
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-main-surface-primary p-3 font-mono text-[11px] leading-5 text-muted-foreground">
-                {proposal.body}
-              </pre>
+              <div className="markdown-preview max-h-[36rem] overflow-auto rounded-md bg-main-surface-primary p-4">
+                <Markdown remarkPlugins={[remarkGfm]}>{proposal.body}</Markdown>
+              </div>
               <div className="mt-2 flex justify-end">
                 <button
                   type="button"
@@ -263,6 +264,7 @@ export function PlanningPage() {
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [filingPassId, setFilingPassId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [config, setConfig] = useState<PlanningConfig | null>(null);
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
@@ -347,11 +349,13 @@ export function PlanningPage() {
   const act = (
     action: (repoId: string, passId: string, ids: string[]) => Promise<void>,
     pass: PlanningPass,
+    isFiling = false,
   ) => {
     if (!repoId) return;
     const ids = selectedIdsIn(pass);
     if (ids.length === 0) return;
     setBusy(true);
+    if (isFiling) setFilingPassId(pass.id);
     action(repoId, pass.id, ids)
       .then(() => {
         setSelected((prev) => {
@@ -362,7 +366,10 @@ export function PlanningPage() {
       })
       .then(refresh)
       .catch(() => {})
-      .finally(() => setBusy(false));
+      .finally(() => {
+        setBusy(false);
+        setFilingPassId(null);
+      });
   };
 
   if (reposLoaded && !current) {
@@ -393,9 +400,9 @@ export function PlanningPage() {
         <h1 className="text-sm font-bold">Planning</h1>
         <div className="flex shrink-0 items-center gap-2">
           <Link
-            href="/planning/config"
-            aria-label="Planning configuration"
-            title="Planning configuration"
+            href="/settings"
+            aria-label="Planning settings"
+            title="Planning settings"
             className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-2.5 text-xs font-medium hover:bg-background-hover"
           >
             <SlidersHorizontal className="h-3.5 w-3.5" />
@@ -460,10 +467,16 @@ export function PlanningPage() {
                   <button
                     type="button"
                     disabled={busy || selectedCount === 0}
-                    onClick={() => act(filePlanningProposals, pass)}
-                    className="inline-flex h-7 items-center rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                    onClick={() => act(filePlanningProposals, pass, true)}
+                    className="inline-flex h-7 min-w-24 items-center justify-center rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
                   >
-                    Create {selectedCount || ''} issue{selectedCount === 1 ? '' : 's'}
+                    {filingPassId === pass.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <>
+                        Create {selectedCount || ''} issue{selectedCount === 1 ? '' : 's'}
+                      </>
+                    )}
                   </button>
                   <button
                     type="button"
