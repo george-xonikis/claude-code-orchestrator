@@ -3,8 +3,18 @@ import type { PlanningPass, Task, TaskStatus } from '@/lib/types';
 /** Statuses with a live session (a paused question keeps its session alive). */
 export const ACTIVE_STATUSES: readonly TaskStatus[] = ['working', 'needs_input'];
 
+/** Tasks labeled "Non agent" must never be implemented by an agent. */
+export function isNonAgentTask(task: Task): boolean {
+  return (task.labels ?? []).some((label) => /^non[- ]?agent$/i.test(label));
+}
+
 export function countActiveSessions(tasks: Task[]): number {
   return tasks.filter((task) => ACTIVE_STATUSES.includes(task.status)).length;
+}
+
+/** Every API call is scoped to a registered repo via the `?repo=<id>` query param. */
+function repoQuery(repoId: string): string {
+  return `?repo=${encodeURIComponent(repoId)}`;
 }
 
 async function post(path: string, body?: unknown): Promise<void> {
@@ -14,29 +24,34 @@ async function post(path: string, body?: unknown): Promise<void> {
       ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
       : {}),
   });
-  if (!res.ok) throw new Error(`POST ${path} failed with ${res.status}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `POST ${path} failed with ${res.status}`);
+  }
 }
 
-export function pollNow(): Promise<void> {
-  return post('/api/poll');
+export function pollNow(repoId: string): Promise<void> {
+  return post(`/api/poll${repoQuery(repoId)}`);
 }
 
-
-export function startTask(issueNumber: number): Promise<void> {
-  return post(`/api/tasks/${issueNumber}/start`);
+export function startTask(repoId: string, issueNumber: number, model?: string): Promise<void> {
+  return post(
+    `/api/tasks/${issueNumber}/start${repoQuery(repoId)}`,
+    model ? { model } : undefined
+  );
 }
 
-export function stopTask(issueNumber: number): Promise<void> {
-  return post(`/api/tasks/${issueNumber}/stop`);
+export function stopTask(repoId: string, issueNumber: number): Promise<void> {
+  return post(`/api/tasks/${issueNumber}/stop${repoQuery(repoId)}`);
 }
 
-export function retryTask(issueNumber: number): Promise<void> {
-  return post(`/api/tasks/${issueNumber}/retry`);
+export function retryTask(repoId: string, issueNumber: number): Promise<void> {
+  return post(`/api/tasks/${issueNumber}/retry${repoQuery(repoId)}`);
 }
 
 /** Push the committed branch and open its PR — the only path that publishes to GitHub. */
-export function pushTask(issueNumber: number): Promise<void> {
-  return post(`/api/tasks/${issueNumber}/push`);
+export function pushTask(repoId: string, issueNumber: number): Promise<void> {
+  return post(`/api/tasks/${issueNumber}/push${repoQuery(repoId)}`);
 }
 
 export type ManualStatus = Extract<TaskStatus, 'ready' | 'committed' | 'failed'>;
@@ -44,8 +59,12 @@ export type ManualStatus = Extract<TaskStatus, 'ready' | 'committed' | 'failed'>
 export const MANUAL_STATUSES: readonly ManualStatus[] = ['ready', 'committed', 'failed'];
 
 /** Manually override a task's status (e.g. failed -> committed). */
-export function setTaskStatus(issueNumber: number, status: ManualStatus): Promise<void> {
-  return post(`/api/tasks/${issueNumber}/status`, { status });
+export function setTaskStatus(
+  repoId: string,
+  issueNumber: number,
+  status: ManualStatus,
+): Promise<void> {
+  return post(`/api/tasks/${issueNumber}/status${repoQuery(repoId)}`, { status });
 }
 
 export interface OrchestratorSettings {
@@ -53,14 +72,14 @@ export interface OrchestratorSettings {
   memory: string;
 }
 
-export async function getSettings(): Promise<OrchestratorSettings> {
-  const res = await fetch('/api/settings');
+export async function getSettings(repoId: string): Promise<OrchestratorSettings> {
+  const res = await fetch(`/api/settings${repoQuery(repoId)}`);
   if (!res.ok) throw new Error(`GET /api/settings failed with ${res.status}`);
   return (await res.json()) as OrchestratorSettings;
 }
 
-export function saveSettings(patch: Partial<OrchestratorSettings>): Promise<void> {
-  return post('/api/settings', patch);
+export function saveSettings(repoId: string, patch: Partial<OrchestratorSettings>): Promise<void> {
+  return post(`/api/settings${repoQuery(repoId)}`, patch);
 }
 
 export interface PlanningData {
@@ -68,38 +87,97 @@ export interface PlanningData {
   intervalHours: number | null;
 }
 
-export async function getPlanning(): Promise<PlanningData> {
-  const res = await fetch('/api/planning');
+export async function getPlanning(repoId: string): Promise<PlanningData> {
+  const res = await fetch(`/api/planning${repoQuery(repoId)}`);
   if (!res.ok) throw new Error(`GET /api/planning failed with ${res.status}`);
   return (await res.json()) as PlanningData;
 }
 
-export function startPlanningPass(): Promise<void> {
-  return post('/api/planning/start');
+export function startPlanningPass(repoId: string): Promise<void> {
+  return post(`/api/planning/start${repoQuery(repoId)}`);
 }
 
 /** null = manual only; otherwise auto-run every N hours. */
-export function setPlanningInterval(hours: number | null): Promise<void> {
-  return post('/api/planning/interval', { hours });
+export function setPlanningInterval(repoId: string, hours: number | null): Promise<void> {
+  return post(`/api/planning/interval${repoQuery(repoId)}`, { hours });
 }
 
-export function filePlanningProposals(passId: string, proposalIds: string[]): Promise<void> {
-  return post('/api/planning/file', { passId, proposalIds });
+export interface TicketSettings {
+  title: string;
+  body: string;
+  preferredModel?: string;
+  useWorkflow?: boolean;
 }
 
-export function dismissPlanningProposals(passId: string, proposalIds: string[]): Promise<void> {
-  return post('/api/planning/dismiss', { passId, proposalIds });
+export async function getTicketSettings(
+  repoId: string,
+  issueNumber: number
+): Promise<TicketSettings> {
+  const res = await fetch(`/api/tasks/${issueNumber}/settings${repoQuery(repoId)}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `GET ticket settings failed with ${res.status}`);
+  }
+  return (await res.json()) as TicketSettings;
 }
 
-export function replyTask(issueNumber: number, message: string): Promise<void> {
-  return post(`/api/tasks/${issueNumber}/reply`, { message });
+export function saveTicketSettings(
+  repoId: string,
+  issueNumber: number,
+  patch: Partial<TicketSettings>
+): Promise<void> {
+  return post(`/api/tasks/${issueNumber}/settings${repoQuery(repoId)}`, patch);
+}
+
+export interface DiscussionMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/** One discussion turn about a proposal; the transcript is client-held. */
+export async function discussProposal(
+  repoId: string,
+  passId: string,
+  proposalId: string,
+  messages: DiscussionMessage[]
+): Promise<string> {
+  const res = await fetch(`/api/planning/discuss${repoQuery(repoId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ passId, proposalId, messages }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `discussion failed with ${res.status}`);
+  }
+  return ((await res.json()) as { reply: string }).reply;
+}
+
+export function filePlanningProposals(
+  repoId: string,
+  passId: string,
+  proposalIds: string[],
+): Promise<void> {
+  return post(`/api/planning/file${repoQuery(repoId)}`, { passId, proposalIds });
+}
+
+export function dismissPlanningProposals(
+  repoId: string,
+  passId: string,
+  proposalIds: string[],
+): Promise<void> {
+  return post(`/api/planning/dismiss${repoQuery(repoId)}`, { passId, proposalIds });
+}
+
+export function replyTask(repoId: string, issueNumber: number, message: string): Promise<void> {
+  return post(`/api/tasks/${issueNumber}/reply${repoQuery(repoId)}`, { message });
 }
 
 /** Stops every session currently holding a slot (working + needs_input). */
-export async function stopAllTasks(tasks: Task[]): Promise<void> {
+export async function stopAllTasks(repoId: string, tasks: Task[]): Promise<void> {
   await Promise.allSettled(
     tasks
       .filter((task) => ACTIVE_STATUSES.includes(task.status))
-      .map((task) => stopTask(task.issueNumber)),
+      .map((task) => stopTask(repoId, task.issueNumber)),
   );
 }

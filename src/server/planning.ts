@@ -1,40 +1,56 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
-import type { PlanningPass, PlanningProposal } from '@/lib/types';
+import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
+import type { PlanningPass, PlanningProposal, RepoInfo } from '@/lib/types';
 import { createIssue } from './github';
+import { readSettings } from './settings';
 
 /**
  * Planning passes: run the principal-engineer and product-manager agents in
- * parallel (read-only, against the MAIN checkout — no worktree), synthesize
- * their reports into a deduped proposal list, and store it for the /planning
- * page. Issues are created ONLY when the developer approves proposals there.
+ * parallel (read-only, against the repo's MAIN checkout — no worktree),
+ * synthesize their reports into a deduped proposal list, and store it for the
+ * /planning page. Issues are created ONLY when the developer approves them there.
  *
- * The agent prompts are the repo's own .claude/agents/*.md definitions
- * (single source of truth — edit those files to tune the agents).
+ * The agent prompts are each managed repo's own .claude/agents/*.md definitions
+ * (single source of truth — edit those files to tune the agents). Everything —
+ * store, run state, auto-run scheduler — is per repo, keyed by repo id.
  */
 
-const REPO_ROOT = '/Users/george-xon/Downloads/Git/nous-ai';
-const PLANNING_FILE = path.join(REPO_ROOT, '.orchestrator', 'planning.json');
-const AGENT_DEFS = {
-  engineer: path.join(REPO_ROOT, '.claude/agents/principal-engineer.md'),
-  pm: path.join(REPO_ROOT, '.claude/agents/product-manager.md'),
+/** Planning persona definition files, relative to the repo root. */
+const PERSONA_FILES = {
+  engineer: '.claude/agents/principal-engineer.md',
+  pm: '.claude/agents/product-manager.md',
 } as const;
 
-interface PlanningGlobal {
+function planningFile(repoPath: string): string {
+  return path.join(repoPath, '.orchestrator', 'planning.json');
+}
+
+interface RepoPlanningState {
   running: boolean;
   timer: ReturnType<typeof setInterval> | null;
   armedHours: number | null;
+}
+
+interface PlanningGlobal {
+  repos: Map<string, RepoPlanningState>;
 }
 
 const globalRef = globalThis as typeof globalThis & {
   __orchestratorPlanning?: PlanningGlobal;
 };
 
-function planningState(): PlanningGlobal {
-  globalRef.__orchestratorPlanning ??= { running: false, timer: null, armedHours: null };
-  return globalRef.__orchestratorPlanning;
+function planningState(repoId: string): RepoPlanningState {
+  globalRef.__orchestratorPlanning ??= { repos: new Map() };
+  const { repos } = globalRef.__orchestratorPlanning;
+  let s = repos.get(repoId);
+  if (!s) {
+    s = { running: false, timer: null, armedHours: null };
+    repos.set(repoId, s);
+  }
+  return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -47,9 +63,9 @@ interface PlanningStore {
   passes: PlanningPass[];
 }
 
-async function loadStore(): Promise<PlanningStore> {
+async function loadStore(repoPath: string): Promise<PlanningStore> {
   try {
-    const raw = await fsp.readFile(PLANNING_FILE, 'utf8');
+    const raw = await fsp.readFile(planningFile(repoPath), 'utf8');
     const parsed = JSON.parse(raw) as {
       intervalHours?: number | null;
       passes?: PlanningPass[];
@@ -60,36 +76,38 @@ async function loadStore(): Promise<PlanningStore> {
   }
 }
 
-async function saveStore(store: PlanningStore): Promise<void> {
-  await fsp.mkdir(path.dirname(PLANNING_FILE), { recursive: true });
-  const tmp = `${PLANNING_FILE}.tmp`;
+async function saveStore(repoPath: string, store: PlanningStore): Promise<void> {
+  const file = planningFile(repoPath);
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(store, null, 2), 'utf8');
-  await fsp.rename(tmp, PLANNING_FILE);
+  await fsp.rename(tmp, file);
 }
 
 async function updatePass(
+  repoPath: string,
   passId: string,
   update: (pass: PlanningPass) => void
 ): Promise<void> {
-  const store = await loadStore();
+  const store = await loadStore(repoPath);
   const pass = store.passes.find((p) => p.id === passId);
   if (!pass) return;
   update(pass);
-  await saveStore(store);
+  await saveStore(repoPath, store);
 }
 
-export async function getPlanning(): Promise<PlanningStore> {
-  return loadStore();
+export async function getPlanning(repo: RepoInfo): Promise<PlanningStore> {
+  return loadStore(repo.path);
 }
 
 // ---------------------------------------------------------------------------
 // Scheduler (auto-run every N hours; requires the dev server to be running)
 // ---------------------------------------------------------------------------
 
-/** Arm/re-arm the auto-run timer to match the stored interval. Idempotent. */
-export async function ensurePlanningScheduler(): Promise<void> {
-  const g = planningState();
-  const { intervalHours } = await loadStore();
+/** Arm/re-arm a repo's auto-run timer to match its stored interval. Idempotent. */
+export async function ensurePlanningScheduler(repo: RepoInfo): Promise<void> {
+  const g = planningState(repo.id);
+  const { intervalHours } = await loadStore(repo.path);
   const hours = intervalHours ?? null;
   if (g.armedHours === hours && (hours === null || g.timer !== null)) return;
   if (g.timer) {
@@ -100,16 +118,19 @@ export async function ensurePlanningScheduler(): Promise<void> {
   if (hours !== null) {
     g.timer = setInterval(() => {
       // startPlanningPass throws if one is already running — that skip is fine.
-      startPlanningPass().catch(() => {});
+      startPlanningPass(repo).catch(() => {});
     }, hours * 3_600_000);
   }
 }
 
-export async function setPlanningInterval(hours: number | null): Promise<void> {
-  const store = await loadStore();
+export async function setPlanningInterval(
+  repo: RepoInfo,
+  hours: number | null
+): Promise<void> {
+  const store = await loadStore(repo.path);
   store.intervalHours = hours;
-  await saveStore(store);
-  await ensurePlanningScheduler();
+  await saveStore(repo.path, store);
+  await ensurePlanningScheduler(repo);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,16 +172,53 @@ const readOnlyCanUseTool: CanUseTool = async (toolName, input) => {
   };
 };
 
-/** Run one session and return its final text result. */
-async function runQuery(prompt: string): Promise<string> {
+/** Planning runs on Fable; when its usage limit is hit, fall back to Opus. */
+const PLANNING_MODEL = 'claude-fable-5';
+const PLANNING_FALLBACK_MODEL = 'claude-opus-4-8';
+
+function isUsageLimitError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /limit|quota|overloaded|exhausted|insufficient|credit/i.test(message);
+}
+
+/** Run one query on the primary planning model, retrying once on Opus if limited. */
+async function runPlanningQuery(
+  repoPath: string,
+  prompt: string,
+  extras?: Parameters<typeof runQuery>[3]
+): Promise<string> {
+  try {
+    return await runQuery(repoPath, prompt, PLANNING_MODEL, extras);
+  } catch (err) {
+    if (!isUsageLimitError(err)) throw err;
+    console.warn(
+      `[orchestrator] planning: ${PLANNING_MODEL} limited, falling back to ${PLANNING_FALLBACK_MODEL}`
+    );
+    return runQuery(repoPath, prompt, PLANNING_FALLBACK_MODEL, extras);
+  }
+}
+
+/** Run one session in the repo's checkout and return its final text result. */
+async function runQuery(
+  repoPath: string,
+  prompt: string,
+  model: string,
+  extras?: {
+    mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
+    allowedTools?: string[];
+  }
+): Promise<string> {
   const q = query({
     prompt,
     options: {
-      cwd: REPO_ROOT,
+      cwd: repoPath,
+      model,
       permissionMode: 'default',
       canUseTool: readOnlyCanUseTool,
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       persistSession: false,
+      ...(extras?.mcpServers ? { mcpServers: extras.mcpServers } : {}),
+      ...(extras?.allowedTools ? { allowedTools: extras.allowedTools } : {}),
     },
   });
   let result = '';
@@ -181,7 +239,11 @@ async function runQuery(prompt: string): Promise<string> {
   return result;
 }
 
-async function runPlanningAgent(defFile: string, exclusions: string): Promise<string> {
+async function runPlanningAgent(
+  repoPath: string,
+  defFile: string,
+  exclusions: string
+): Promise<string> {
   const definition = await fsp.readFile(defFile, 'utf8');
   const body = definition.replace(/^---[\s\S]*?---\s*/, '');
   const preamble = [
@@ -191,7 +253,37 @@ async function runPlanningAgent(defFile: string, exclusions: string): Promise<st
     'output format the instructions specify.',
   ].join(' ');
   const sections = [preamble, exclusions, '---', body].filter(Boolean);
-  return runQuery(sections.join('\n\n'));
+  return runPlanningQuery(repoPath, sections.join('\n\n'));
+}
+
+/**
+ * Both persona definition files must exist in the repo before a pass can run.
+ * Throws a clear error naming the expected files (surfaced on the Planning page).
+ */
+async function requirePersonaFiles(
+  repo: RepoInfo
+): Promise<{ engineer: string; pm: string }> {
+  const engineer = path.join(repo.path, PERSONA_FILES.engineer);
+  const pm = path.join(repo.path, PERSONA_FILES.pm);
+  const missing: string[] = [];
+  for (const [label, file] of [
+    [PERSONA_FILES.engineer, engineer],
+    [PERSONA_FILES.pm, pm],
+  ] as const) {
+    try {
+      await fsp.access(file);
+    } catch {
+      missing.push(label);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Planning personas missing in ${repo.name}: create ${missing.join(
+        ' and '
+      )} (planning passes need both ${PERSONA_FILES.engineer} and ${PERSONA_FILES.pm} in the repo)`
+    );
+  }
+  return { engineer, pm };
 }
 
 /**
@@ -302,10 +394,11 @@ function parseProposals(raw: string): PlanningProposal[] {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Kick off a planning pass (engineer + PM in parallel, then synthesis). */
-export async function startPlanningPass(): Promise<string> {
-  const g = planningState();
+/** Kick off a planning pass for a repo (engineer + PM in parallel, then synthesis). */
+export async function startPlanningPass(repo: RepoInfo): Promise<string> {
+  const g = planningState(repo.id);
   if (g.running) throw new Error('A planning pass is already running');
+  const personas = await requirePersonaFiles(repo);
   g.running = true;
 
   const pass: PlanningPass = {
@@ -314,28 +407,28 @@ export async function startPlanningPass(): Promise<string> {
     status: 'running',
     proposals: [],
   };
-  const store = await loadStore();
+  const store = await loadStore(repo.path);
   // Digest of prior proposals (before this pass) so agents skip re-proposing them.
   const exclusions = exclusionDigest(store.passes);
   store.passes.unshift(pass);
-  await saveStore(store);
+  await saveStore(repo.path, store);
 
   void (async () => {
     try {
       const [engineerReport, pmReport] = await Promise.all([
-        runPlanningAgent(AGENT_DEFS.engineer, exclusions),
-        runPlanningAgent(AGENT_DEFS.pm, exclusions),
+        runPlanningAgent(repo.path, personas.engineer, exclusions),
+        runPlanningAgent(repo.path, personas.pm, exclusions),
       ]);
       const proposals = parseProposals(
-        await runQuery(synthesisPrompt(engineerReport, pmReport, exclusions))
+        await runPlanningQuery(repo.path, synthesisPrompt(engineerReport, pmReport, exclusions))
       );
-      await updatePass(pass.id, (p) => {
+      await updatePass(repo.path, pass.id, (p) => {
         p.status = 'complete';
         p.proposals = proposals;
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await updatePass(pass.id, (p) => {
+      await updatePass(repo.path, pass.id, (p) => {
         p.status = 'failed';
         p.error = message;
       }).catch(() => {});
@@ -348,30 +441,192 @@ export async function startPlanningPass(): Promise<string> {
 }
 
 /** File the selected pending proposals as GitHub issues (label: proposed). */
-export async function fileProposals(passId: string, proposalIds: string[]): Promise<void> {
-  const store = await loadStore();
+export async function fileProposals(
+  repo: RepoInfo,
+  passId: string,
+  proposalIds: string[]
+): Promise<void> {
+  const store = await loadStore(repo.path);
   const pass = store.passes.find((p) => p.id === passId);
   if (!pass) throw new Error(`Unknown planning pass ${passId}`);
   for (const id of proposalIds) {
     const proposal = pass.proposals.find((p) => p.id === id);
     if (!proposal || proposal.status !== 'pending') continue;
-    const issue = await createIssue(proposal.title, proposal.body, [
+    const issue = await createIssue(repo.path, proposal.title, proposal.body, [
       ...proposal.labels,
       'proposed',
     ]);
     proposal.status = 'filed';
     proposal.issueNumber = issue.number;
     proposal.issueUrl = issue.url;
-    await saveStore(store); // persist after each so a mid-batch failure loses nothing
+    await saveStore(repo.path, store); // persist after each so a mid-batch failure loses nothing
   }
 }
 
 /** Dismiss the selected pending proposals. */
-export async function dismissProposals(passId: string, proposalIds: string[]): Promise<void> {
-  await updatePass(passId, (pass) => {
+export async function dismissProposals(
+  repo: RepoInfo,
+  passId: string,
+  proposalIds: string[]
+): Promise<void> {
+  await updatePass(repo.path, passId, (pass) => {
     for (const id of proposalIds) {
       const proposal = pass.proposals.find((p) => p.id === id);
       if (proposal && proposal.status === 'pending') proposal.status = 'dismissed';
     }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Proposal discussion (the "Discuss" drawer on the planning page)
+// ---------------------------------------------------------------------------
+
+export interface DiscussionMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/** Patch a proposal's content in place (discussion tool). */
+async function updateProposalContent(
+  repoPath: string,
+  passId: string,
+  proposalId: string,
+  patch: { title?: string; body?: string; labels?: string[] }
+): Promise<PlanningProposal> {
+  let updated: PlanningProposal | undefined;
+  await updatePass(repoPath, passId, (pass) => {
+    const proposal = pass.proposals.find((p) => p.id === proposalId);
+    if (!proposal) return;
+    if (patch.title !== undefined) proposal.title = patch.title.slice(0, 120);
+    if (patch.body !== undefined) proposal.body = patch.body;
+    if (patch.labels !== undefined) proposal.labels = patch.labels;
+    updated = proposal;
+  });
+  if (!updated) throw new Error(`Unknown proposal ${proposalId} in pass ${passId}`);
+  return updated;
+}
+
+/** Add a new proposal to a pass (discussion "split" tool). */
+async function addProposalToPass(
+  repoPath: string,
+  passId: string,
+  data: { title: string; body: string; labels: string[]; effort?: string; impact?: string }
+): Promise<PlanningProposal> {
+  let created: PlanningProposal | undefined;
+  await updatePass(repoPath, passId, (pass) => {
+    const nextIndex =
+      pass.proposals.reduce((max, p) => {
+        const n = Number(p.id.replace(/^p/, ''));
+        return Number.isFinite(n) ? Math.max(max, n) : max;
+      }, 0) + 1;
+    created = {
+      id: `p${nextIndex}`,
+      title: data.title.slice(0, 120),
+      body: data.body,
+      labels: data.labels,
+      source: 'both',
+      effort: data.effort,
+      impact: data.impact,
+      status: 'pending',
+    };
+    pass.proposals.push(created);
+  });
+  if (!created) throw new Error(`Unknown planning pass ${passId}`);
+  return created;
+}
+
+function discussionPrompt(
+  proposal: PlanningProposal,
+  goal: string,
+  messages: DiscussionMessage[]
+): string {
+  const transcript = messages
+    .map((m) => `${m.role === 'user' ? 'DEVELOPER' : 'YOU'}: ${m.text}`)
+    .join('\n\n');
+  return [
+    'You are discussing ONE task proposal with the developer before it may be',
+    'filed as a GitHub issue. Your working directory is the repository the',
+    'proposal is about — read code (read-only) to verify claims when the',
+    'discussion needs evidence. Be direct and concise; agree or push back on',
+    'the merits, not to please.',
+    '',
+    'Tools:',
+    '- `update_proposal` — apply changes the two of you agree on (partial:',
+    '  title/body/labels). Keep bodies in "## Problem / ## Proposed direction /',
+    '  ## Success criteria" form; labels only from: Bug, FE, BE, AI, Infra.',
+    '- `create_proposal` — when you agree to split scope, create the new',
+    '  proposal in the same pass (same body format).',
+    'After a tool call, confirm in one sentence what changed. Never create',
+    'GitHub issues — the developer files proposals from the UI.',
+    '',
+    '## Project goal',
+    goal.trim() || '(no goal file)',
+    '',
+    '## Current proposal',
+    JSON.stringify(proposal, null, 2),
+    '',
+    ...(transcript ? ['## Conversation so far', transcript, ''] : []),
+    'Reply to the last developer message.',
+  ].join('\n');
+}
+
+/**
+ * One discussion turn: stateless per call — the client sends the transcript,
+ * the reply comes back, and any tool-applied proposal edits are persisted.
+ */
+export async function discussProposal(
+  repo: RepoInfo,
+  passId: string,
+  proposalId: string,
+  messages: DiscussionMessage[]
+): Promise<string> {
+  const store = await loadStore(repo.path);
+  const pass = store.passes.find((p) => p.id === passId);
+  const proposal = pass?.proposals.find((p) => p.id === proposalId);
+  if (!pass || !proposal) throw new Error(`Unknown proposal ${proposalId} in pass ${passId}`);
+
+  const { goal } = await readSettings(repo.path);
+  const tools = createSdkMcpServer({
+    name: 'orchestrator',
+    version: '1.0.0',
+    tools: [
+      tool(
+        'update_proposal',
+        'Apply agreed changes to the proposal under discussion. Provide only the fields to change.',
+        {
+          title: z.string().optional(),
+          body: z.string().optional(),
+          labels: z.array(z.string()).optional(),
+        },
+        async (patch) => {
+          const updated = await updateProposalContent(repo.path, passId, proposalId, patch);
+          return {
+            content: [{ type: 'text', text: `Proposal updated: ${updated.title}` }],
+          };
+        }
+      ),
+      tool(
+        'create_proposal',
+        'Create an additional proposal in the same planning pass (e.g. when splitting scope).',
+        {
+          title: z.string(),
+          body: z.string(),
+          labels: z.array(z.string()),
+          effort: z.string().optional(),
+          impact: z.string().optional(),
+        },
+        async (data) => {
+          const created = await addProposalToPass(repo.path, passId, data);
+          return {
+            content: [{ type: 'text', text: `Created proposal ${created.id}: ${created.title}` }],
+          };
+        }
+      ),
+    ],
+  });
+
+  return runPlanningQuery(repo.path, discussionPrompt(proposal, goal, messages), {
+    mcpServers: { orchestrator: tools },
+    allowedTools: ['mcp__orchestrator__update_proposal', 'mcp__orchestrator__create_proposal'],
   });
 }

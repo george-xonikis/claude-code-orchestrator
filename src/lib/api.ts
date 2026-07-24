@@ -17,8 +17,10 @@ export function parseIssueNumber(n: string): number | null {
 const LOCAL_HOST_PATTERN = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 
 /**
- * CSRF / DNS-rebinding guard for state-mutating routes. Cross-origin
- * `text/plain` POSTs skip the preflight, so before acting we require:
+ * CSRF / DNS-rebinding guard. Enforced on EVERY /api route by src/proxy.ts
+ * (reads leak repo paths, goal/memory content, and logs to a rebound
+ * hostname), and called again by mutating handlers as defense in depth.
+ * Cross-origin `text/plain` POSTs skip the preflight, so we require:
  * - a localhost Host header (defeats DNS rebinding), and
  * - when an Origin header is present (browsers always send it on POST),
  *   a localhost origin (defeats cross-origin form/fetch CSRF).

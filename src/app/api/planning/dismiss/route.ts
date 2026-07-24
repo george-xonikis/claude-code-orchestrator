@@ -1,11 +1,15 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
+import { resolveRepo } from '@/lib/repo-params';
 import { dismissProposals } from '@/server/planning';
 
-/** POST /api/planning/dismiss {passId, proposalIds} -> dismiss pending proposals. */
+/** POST /api/planning/dismiss?repo=<id> {passId, proposalIds} -> dismiss pending proposals. */
 export async function POST(request: Request) {
   const forbidden = rejectNonLocal(request);
   if (forbidden) return forbidden;
+
+  const repo = await resolveRepo(request);
+  if (repo instanceof NextResponse) return repo;
 
   try {
     const body = (await request.json().catch(() => null)) as {
@@ -20,7 +24,7 @@ export async function POST(request: Request) {
     ) {
       return badRequest('Provide passId (string) and proposalIds (string[])');
     }
-    await dismissProposals(body.passId, body.proposalIds);
+    await dismissProposals(repo, body.passId, body.proposalIds);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err);

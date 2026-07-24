@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 
+import { RepoProvider } from '@/components/shared/use-repo';
 import { TopBar } from '@/components/top-bar';
 import './globals.css';
 
@@ -26,8 +27,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     >
       <body className="bg-main-surface-primary text-foreground antialiased">
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
-        <TopBar />
-        {children}
+        <RepoProvider>
+          <TopBar />
+          <main className="mx-auto w-full max-w-[1600px]">{children}</main>
+        </RepoProvider>
       </body>
     </html>
   );

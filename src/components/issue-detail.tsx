@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
+import { formatModel } from '@/components/shared/format';
 import { useRouter } from 'next/navigation';
 
 import type { LogEvent, Task, TaskStatus } from '@/lib/types';
@@ -12,12 +12,22 @@ import {
   type ManualStatus,
   pushTask,
   replyTask,
+  retryTask,
   setTaskStatus,
   stopTask,
 } from '@/components/shared/task-actions';
+import { useRepo } from '@/components/shared/use-repo';
 import { useTasks } from '@/components/shared/use-tasks';
 
-const REPO_URL = 'https://github.com/george-xonikis/nous-ai';
+/** Selected repo id for API calls and issue-detail links. */
+function useRepoId(): string {
+  return useRepo().current?.id ?? '';
+}
+
+/** Detail-page URL for an issue, scoped to the selected repo. */
+function issueHref(repoId: string, issueNumber: number): string {
+  return `/issues/${issueNumber}?repo=${encodeURIComponent(repoId)}`;
+}
 
 /** Mockup left-list status dots (working/needs_input pulse, ready is faded). */
 const STATUS_DOTS: Record<TaskStatus, string> = {
@@ -64,7 +74,7 @@ function formatElapsed(from: string | undefined, now: number): string {
   return `${Math.floor(mins / 60)}h ${mins % 60}m`;
 }
 
-/** `/Users/…/nous-ai/.worktrees/issue-312` → `.worktrees/issue-312` (mockup meta style). */
+/** `/Users/…/<repo>/.worktrees/issue-312` → `.worktrees/issue-312` (mockup meta style). */
 function shortWorktreePath(path: string): string {
   const index = path.indexOf('.worktrees');
   return index >= 0 ? path.slice(index) : path;
@@ -98,12 +108,13 @@ function substatus(task: Task, now: number): { text: string; className: string }
 
 function TaskListItem({ task, selected }: { task: Task; selected: boolean }) {
   const router = useRouter();
+  const repoId = useRepoId();
   const now = useNow();
   const sub = substatus(task, now);
   return (
     <button
       type="button"
-      onClick={() => router.push(`/issues/${task.issueNumber}`)}
+      onClick={() => router.push(issueHref(repoId, task.issueNumber))}
       className={
         selected
           ? 'flex items-start gap-2.5 border-l-2 border-primary bg-background-hover px-4 py-3 text-left'
@@ -158,6 +169,7 @@ function PromptPanel({ prompt }: { prompt: string }) {
 }
 
 function QuestionBanner({ task }: { task: Task }) {
+  const repoId = useRepoId();
   const [reply, setReply] = useState('');
   const [sending, setSending] = useState(false);
 
@@ -165,7 +177,7 @@ function QuestionBanner({ task }: { task: Task }) {
     const message = reply.trim();
     if (!message) return;
     setSending(true);
-    replyTask(task.issueNumber, message)
+    replyTask(repoId, task.issueNumber, message)
       .then(() => setReply(''))
       .catch(() => {})
       .finally(() => setSending(false));
@@ -207,19 +219,25 @@ function QuestionBanner({ task }: { task: Task }) {
 }
 
 function LogTail({ issueNumber, fallbackLines }: { issueNumber: number; fallbackLines?: string[] }) {
+  const repoId = useRepoId();
   const [lines, setLines] = useState<LogEvent[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Reset the buffer during render when the issue changes (React's derived-state pattern),
-  // so the effect below only manages the EventSource subscription.
-  const [streamedIssue, setStreamedIssue] = useState(issueNumber);
-  if (streamedIssue !== issueNumber) {
-    setStreamedIssue(issueNumber);
+  // Reset the buffer during render when the issue or repo changes (React's
+  // derived-state pattern), so the effect below only manages the EventSource
+  // subscription. Issue numbers are NOT unique across repos.
+  const streamKey = `${repoId}:${issueNumber}`;
+  const [streamedKey, setStreamedKey] = useState(streamKey);
+  if (streamedKey !== streamKey) {
+    setStreamedKey(streamKey);
     setLines([]);
   }
 
   useEffect(() => {
-    const source = new EventSource(`/api/tasks/${issueNumber}/logs`);
+    if (!repoId) return;
+    const source = new EventSource(
+      `/api/tasks/${issueNumber}/logs?repo=${encodeURIComponent(repoId)}`,
+    );
     source.onmessage = (event) => {
       let entry: LogEvent;
       try {
@@ -236,7 +254,7 @@ function LogTail({ issueNumber, fallbackLines }: { issueNumber: number; fallback
     };
     // EventSource reconnects automatically — nothing to do on error.
     return () => source.close();
-  }, [issueNumber]);
+  }, [repoId, issueNumber]);
 
   // Keep the newest line in view.
   useEffect(() => {
@@ -268,9 +286,12 @@ function LogTail({ issueNumber, fallbackLines }: { issueNumber: number; fallback
 }
 
 function DetailPane({ task }: { task: Task }) {
+  const { current } = useRepo();
+  const repoId = current?.id ?? '';
   const now = useNow();
   const [stopping, setStopping] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const badge = STATUS_BADGES[task.status];
   const badgeLabel =
     task.status === 'needs_input'
@@ -282,12 +303,6 @@ function DetailPane({ task }: { task: Task }) {
     <div className="flex min-h-0 min-w-0 flex-col">
       <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
         <div className="flex min-w-0 items-start gap-3">
-          <Link
-            href="/"
-            className="mt-0.5 shrink-0 text-sm font-medium text-muted-foreground hover:text-foreground"
-          >
-            ← Board
-          </Link>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-sm font-bold">
@@ -302,6 +317,7 @@ function DetailPane({ task }: { task: Task }) {
             <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-muted-foreground">
               {task.worktreePath && <span>wt: {shortWorktreePath(task.worktreePath)}</span>}
               {task.branch && <span>branch: {task.branch}</span>}
+              {task.model && <span>model: {formatModel(task.model)}</span>}
               {task.turns !== undefined && <span>turns: {task.turns}</span>}
               {task.costUsd !== undefined && <span>${task.costUsd.toFixed(2)}</span>}
             </div>
@@ -313,7 +329,9 @@ function DetailPane({ task }: { task: Task }) {
               value={task.status}
               aria-label="Set task status"
               onChange={(event) => {
-                setTaskStatus(task.issueNumber, event.target.value as ManualStatus).catch(() => {});
+                setTaskStatus(repoId, task.issueNumber, event.target.value as ManualStatus).catch(
+                  () => {},
+                );
               }}
               className="h-8 rounded-md border border-border bg-elevated-secondary px-2 text-xs font-medium outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
             >
@@ -329,21 +347,38 @@ function DetailPane({ task }: { task: Task }) {
               ))}
             </select>
           )}
-          <a
-            href={`${REPO_URL}/issues/${task.issueNumber}`}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-sm font-medium hover:bg-background-hover"
-          >
-            Open issue ↗
-          </a>
+          {current?.htmlUrl && (
+            <a
+              href={`${current.htmlUrl}/issues/${task.issueNumber}`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-sm font-medium hover:bg-background-hover"
+            >
+              Open issue ↗
+            </a>
+          )}
+          {task.status === 'failed' && (
+            <button
+              type="button"
+              disabled={retrying}
+              onClick={() => {
+                setRetrying(true);
+                retryTask(repoId, task.issueNumber)
+                  .catch((err) => window.alert(err instanceof Error ? err.message : String(err)))
+                  .finally(() => setRetrying(false));
+              }}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            >
+              ↻ Retry
+            </button>
+          )}
           {task.status === 'committed' && (
             <button
               type="button"
               disabled={pushing}
               onClick={() => {
                 setPushing(true);
-                pushTask(task.issueNumber)
+                pushTask(repoId, task.issueNumber)
                   .catch(() => {})
                   .finally(() => setPushing(false));
               }}
@@ -358,7 +393,7 @@ function DetailPane({ task }: { task: Task }) {
               disabled={stopping}
               onClick={() => {
                 setStopping(true);
-                stopTask(task.issueNumber)
+                stopTask(repoId, task.issueNumber)
                   .catch(() => {})
                   .finally(() => setStopping(false));
               }}
@@ -404,12 +439,6 @@ export function IssueDetail({ issueNumber }: { issueNumber: number }) {
       ) : (
         <div className="flex min-h-0 flex-col">
           <div className="flex items-start gap-3 border-b border-border px-5 py-4">
-            <Link
-              href="/"
-              className="mt-0.5 shrink-0 text-sm font-medium text-muted-foreground hover:text-foreground"
-            >
-              ← Board
-            </Link>
             <span className="text-sm font-bold">#{issueNumber}</span>
           </div>
           <div className="flex flex-1 items-center justify-center bg-elevated-secondary p-4 text-sm text-muted-foreground">

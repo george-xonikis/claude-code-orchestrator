@@ -15,7 +15,8 @@ export function buildPrompt(
   worktreePath: string,
   branch: string,
   goal: string,
-  memory: string
+  memory: string,
+  useWorkflow = false
 ): string {
   const lines = [
     `You are an autonomous engineering agent working on GitHub issue #${issueNumber} of this repository.`,
@@ -25,7 +26,9 @@ export function buildPrompt(
     `Workflow:`,
     `1. Read the issue first: run \`gh issue view ${issueNumber} --comments\` to get its title, body, and all comments. Treat them as the full task specification.`,
     `2. Follow the repository's CLAUDE.md conventions and architecture rules.`,
-    `3. Implement the change.`,
+    useWorkflow
+      ? `3. Implement the change. For large or multi-part tasks, orchestrate instead of grinding serially: fan out subagents (and workflow tooling if available) for independent parts — parallel exploration of separate modules, parallel implementation of independent pieces, reviews in parallel — then integrate their results yourself.`
+      : `3. Implement the change yourself, directly — do NOT fan out subagents or workflows for the implementation (reviews in step 5 still use their agents).`,
     `4. Verify with lint and unit tests ONLY. NEVER run e2e tests, NEVER run database migrations, and NEVER run \`make db-migrate-prod\` or any deploy/prod command.`,
     `5. Before committing, ALWAYS request code reviews from BOTH the \`code-architect\` AND the \`data-privacy-reviewer\` agents (run them in parallel). Apply fixes for their confirmed findings (re-running lint/unit tests after), and only then commit. Never skip this step, even for small or docs-only changes.`,
     `6. Commit your work with conventional commit messages.`,

@@ -5,12 +5,14 @@ import {
   parseIssueNumber,
   rejectNonLocal,
 } from '@/lib/api';
+import { resolveRepo } from '@/lib/repo-params';
 import { ensureLoopStarted } from '@/server/loop';
 import { replySession } from '@/server/sessions';
 
 /**
- * POST /api/tasks/[n]/reply {message} -> answer a session paused in needs_input.
- * The session resumes and its status flips back to working via session events.
+ * POST /api/tasks/[n]/reply?repo=<id> {message} -> answer a session paused in
+ * needs_input. The session resumes and its status flips back to working via
+ * session events.
  */
 export async function POST(
   request: Request,
@@ -18,6 +20,9 @@ export async function POST(
 ) {
   const forbidden = rejectNonLocal(request);
   if (forbidden) return forbidden;
+
+  const repo = await resolveRepo(request);
+  if (repo instanceof NextResponse) return repo;
 
   const issueNumber = parseIssueNumber((await params).n);
   if (issueNumber === null) return badRequest('Invalid issue number');
@@ -34,7 +39,7 @@ export async function POST(
 
   try {
     ensureLoopStarted();
-    await replySession(issueNumber, message);
+    await replySession(repo, issueNumber, message);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err);

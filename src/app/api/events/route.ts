@@ -1,13 +1,18 @@
 import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
 import type { Task } from '@/lib/types';
 import { SSE_HEADERS } from '@/lib/api';
+import { resolveRepo } from '@/lib/repo-params';
 import { ensureLoopStarted } from '@/server/loop';
 import { getTasks, subscribe } from '@/server/state';
 
 export const dynamic = 'force-dynamic';
 
-/** GET /api/events -> SSE stream of full Task[] snapshots on any change. */
+/** GET /api/events?repo=<id> -> SSE stream of full Task[] snapshots on any change. */
 export async function GET(request: NextRequest) {
+  const repo = await resolveRepo(request);
+  if (repo instanceof NextResponse) return repo;
+
   ensureLoopStarted();
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
@@ -24,8 +29,8 @@ export async function GET(request: NextRequest) {
         }
       };
 
-      unsubscribe = subscribe(send);
-      send(await getTasks()); // Initial snapshot.
+      unsubscribe = subscribe(repo.path, send);
+      send(await getTasks(repo.path)); // Initial snapshot.
 
       request.signal.addEventListener('abort', () => {
         closed = true;

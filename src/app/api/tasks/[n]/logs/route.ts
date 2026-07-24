@@ -1,19 +1,24 @@
 import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
 import type { LogEvent } from '@/lib/types';
 import { badRequest, parseIssueNumber, SSE_HEADERS } from '@/lib/api';
+import { resolveRepo } from '@/lib/repo-params';
 import { ensureLoopStarted } from '@/server/loop';
 import { readLogEvents, subscribeLogs } from '@/server/state';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * GET /api/tasks/[n]/logs -> SSE stream of LogEvents: replays the last 200
- * lines from the JSONL file, then streams live events.
+ * GET /api/tasks/[n]/logs?repo=<id> -> SSE stream of LogEvents: replays the
+ * last 200 lines from the JSONL file, then streams live events.
  */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ n: string }> }
 ) {
+  const repo = await resolveRepo(request);
+  if (repo instanceof NextResponse) return repo;
+
   const issueNumber = parseIssueNumber((await params).n);
   if (issueNumber === null) return badRequest('Invalid issue number');
 
@@ -36,12 +41,12 @@ export async function GET(
       // Subscribe first (buffering) so no live event is lost during replay.
       let replayDone = false;
       const buffered: LogEvent[] = [];
-      unsubscribe = subscribeLogs(issueNumber, (event) => {
+      unsubscribe = subscribeLogs(repo.path, issueNumber, (event) => {
         if (replayDone) send(event);
         else buffered.push(event);
       });
 
-      for (const event of await readLogEvents(issueNumber, 200)) {
+      for (const event of await readLogEvents(repo.path, issueNumber, 200)) {
         send(event);
       }
       for (const event of buffered) {

@@ -1,20 +1,27 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
+import { resolveRepo } from '@/lib/repo-params';
 import { readSettings, writeSettings } from '@/server/settings';
 
-/** GET /api/settings -> { goal, memory }. */
-export async function GET() {
+/** GET /api/settings?repo=<id> -> { goal, memory }. */
+export async function GET(request: Request) {
+  const repo = await resolveRepo(request);
+  if (repo instanceof NextResponse) return repo;
+
   try {
-    return NextResponse.json(await readSettings());
+    return NextResponse.json(await readSettings(repo.path));
   } catch (err) {
     return errorResponse(err);
   }
 }
 
-/** POST /api/settings {goal?, memory?} -> save the provided fields. */
+/** POST /api/settings?repo=<id> {goal?, memory?} -> save the provided fields. */
 export async function POST(request: Request) {
   const forbidden = rejectNonLocal(request);
   if (forbidden) return forbidden;
+
+  const repo = await resolveRepo(request);
+  if (repo instanceof NextResponse) return repo;
 
   try {
     const body = (await request.json().catch(() => null)) as {
@@ -30,7 +37,7 @@ export async function POST(request: Request) {
     if (body.memory !== undefined && typeof body.memory !== 'string') {
       return badRequest('memory must be a string');
     }
-    await writeSettings({ goal: body.goal, memory: body.memory });
+    await writeSettings(repo.path, { goal: body.goal, memory: body.memory });
     return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err);

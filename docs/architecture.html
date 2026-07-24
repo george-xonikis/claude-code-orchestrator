@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Claude Code Orchestrator — Architecture</title>
+<style>
+  :root { --fg:#1e293b; --muted:#6b7280; --border:#e5e7eb; --bg:#fff; --panel:#f9f9f9; --accent:#2563eb; --code:#f3f4f6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#f3f4f6; --muted:#9ca3af; --border:#374151; --bg:#111827; --panel:#1f2937; --accent:#3b82f6; --code:#1f2937; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0 auto; max-width:60rem; padding:2.5rem 1.5rem 5rem; font:15px/1.6 system-ui,-apple-system,sans-serif; color:var(--fg); background:var(--bg); }
+  h1 { font-size:2rem; margin:0 0 .25rem; }
+  h2 { font-size:1.35rem; margin:2.5rem 0 .75rem; padding-top:1.25rem; border-top:1px solid var(--border); }
+  h3 { font-size:.8rem; margin:1.5rem 0 .5rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  p, li { color:var(--fg); }
+  .muted { color:var(--muted); }
+  code { font:12.5px/1.5 ui-monospace,Menlo,monospace; background:var(--code); padding:.1em .35em; border-radius:4px; }
+  pre { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:1rem; overflow-x:auto; font:12.5px/1.55 ui-monospace,Menlo,monospace; }
+  pre code { background:none; padding:0; }
+  table { border-collapse:collapse; width:100%; margin:.75rem 0; font-size:.85rem; }
+  th, td { border:1px solid var(--border); padding:.4rem .6rem; text-align:left; vertical-align:top; }
+  th { background:var(--panel); }
+  .flow { color:var(--accent); font-weight:600; }
+</style>
+</head>
+<body>
+
+<h1>Claude Code Orchestrator</h1>
+<p class="muted">A local Next.js dashboard that runs autonomous Claude Code agents against the GitHub issues of any number of local repositories. All intelligence comes from the <strong>Claude Agent SDK</strong> (the Claude Code harness as a library); the orchestrator supplies the workflow, guardrails, and UI around it.</p>
+<h2>System overview</h2>
+<pre>
+┌────────────────────────── Next.js app (localhost:3002) ──────────────────────────┐
+│  UI: Board (kanban) · Issue detail (logs) · Planning · Goal/Memory                │
+│  API routes (all require ?repo=&lt;id&gt;, localhost-only via global middleware)        │
+│                                                                                   │
+│  server modules (every function takes the repo first):                            │
+│   repos.ts      repo registry (data/repos.json, add by path or clone URL)         │
+│   loop.ts       2-min poll of every repo, status→label mirroring, actions         │
+│   github.ts     gh CLI wrapper (cwd = repo path): issues, labels, PRs             │
+│   worktrees.ts  git worktrees at &lt;repo&gt;/.worktrees/issue-{n}                      │
+│   sessions.ts   Agent SDK sessions (one per issue) + ask_user / save_memory       │
+│   planning.ts   planning passes: 2 personas → synthesis → approval               │
+│   state.ts      per-repo task store + SSE fan-out                                 │
+│   settings.ts   per-repo goal.md / memory.md                                      │
+└───────────────────────────────────────────────────────────────────────────────────┘
+        │ per-repo data (nothing global)                       │ auth
+        ▼                                                      ▼
+  &lt;repo&gt;/.orchestrator/{state.json, logs/, goal.md,      gh CLI login (GitHub)
+        memory.md, planning.json}                        Claude Code login / API key
+  &lt;repo&gt;/.worktrees/issue-{n}
+  &lt;repo&gt;/.claude/agents/{principal-engineer,product-manager}.md
+</pre>
+<p>The orchestrator itself stores only the repo registry. Everything else (tasks, logs, goal, memory, planning history, worktrees, personas) lives <em>inside</em> the managed repo, so removing a repo from the registry loses nothing and re-adding it restores everything.</p>
+
+<h2>Task lifecycle</h2>
+<pre>
+ready ──(Start button)──▶ working ──▶ committed ──(Push &amp; open PR)──▶ pr_open
+                            │   ╲                       ▲
+                            │    ╲──▶ failed ──(Retry)──┘ (reuses worktree)
+                            ▼
+                       needs_input  (session paused on a question; reply resumes it)
+</pre>
+<ul>
+  <li><span class="flow">Discovery:</span> the loop polls <code>gh issue list</code> per repo; every open issue becomes a <em>ready</em> card. Nothing starts automatically.</li>
+  <li><span class="flow">Start:</span> creates <code>&lt;repo&gt;/.worktrees/issue-{n}</code> on branch <code>agent/issue-{n}</code> (based on the repo's actual default branch, resolved from <code>origin/HEAD</code>), then launches one SDK session with <code>cwd</code> = the worktree.</li>
+  <li><span class="flow">Finish:</span> agents only ever <em>commit</em>. A clean finish is <em>committed</em>; pushing and PR creation happen exclusively from the dashboard. Status is mirrored to GitHub labels (<code>agent-working</code>, <code>agent-committed</code>, <code>agent-pr</code>, <code>agent-failed</code>, <code>agent-needs-input</code>).</li>
+</ul>
+
+<h2>Under the hood: the task prompt</h2>
+<p>Every session receives one composed user message (<code>src/server/task-prompt.ts</code>). Its anatomy:</p>
+<pre>
+You are an autonomous engineering agent working on GitHub issue #{n} …
+Your working directory is the git worktree at {path}, branch `agent/issue-{n}`.
+
+Workflow:
+1. Read the issue first (gh issue view {n} --comments) — it is the full spec.
+2. Follow the repository's CLAUDE.md conventions.          ◀ loaded automatically:
+3. Implement the change.                                     the session runs the
+4. Verify with lint and unit tests ONLY (never e2e,          `claude_code` system-
+   never migrations, never deploy commands).                 prompt preset
+5. Before committing, ALWAYS request reviews from BOTH the
+   `code-architect` AND `data-privacy-reviewer` agents       ◀ resolved from the
+   (in parallel); apply confirmed findings, re-verify.         repo's .claude/agents
+6. Commit with conventional commits.
+7. STOP after committing. NEVER push, NEVER `gh pr create`.
+
+If blocked on a decision only the developer can make, call `ask_user` once.
+If you learn a reusable lesson, call `save_memory` once (one sentence).
+
+## Project goal          ◀ injected from &lt;repo&gt;/.orchestrator/goal.md
+…vision + current priorities…
+
+## Lessons from previous agent sessions   ◀ injected from memory.md
+…curated, agent-appended `- [#n] lesson` lines…
+</pre>
+<p>The rendered prompt is stored on the task (the "Task prompt" panel in the UI) and logged as a highlighted <code>prompt</code> event, so you can always see exactly what an agent was told.</p>
+
+<h3>Custom tools (in-process MCP)</h3>
+<table>
+  <tr><th>Tool</th><th>What happens</th></tr>
+  <tr><td><code>ask_user(question)</code></td><td>Task flips to <em>needs_input</em>; the tool call is held unresolved until you reply from the UI, then the answer becomes the tool result and the same turn continues with full context.</td></tr>
+  <tr><td><code>save_memory(lesson)</code></td><td>Server appends <code>- [#n] lesson</code> to the repo's <code>memory.md</code>: the only write path into memory; agents cannot touch <code>.orchestrator/</code> directly.</td></tr>
+</table>
+
+<h3>Permission model</h3>
+<ul>
+  <li><code>permissionMode: 'acceptEdits'</code> plus a <code>canUseTool</code> callback (deliberately <em>not</em> bypass mode, so the callback is always consulted).</li>
+  <li>File tools (Read/Write/Edit/Glob/Grep) are confined to the issue's worktree; credential dotfiles and out-of-worktree <code>.env*</code> are denied.</li>
+  <li>Bash deny-list: all <code>git push</code> variants (incl. <code>+branch</code> force forms), <code>gh pr create</code>, workflow dispatch, deploy/prod-DB patterns, remote-host psql; <code>curl</code>/<code>wget</code>/WebFetch restricted to GitHub hosts.</li>
+  <li>SDK stream events are mapped to compact log lines (tool + command/path only, never file contents) and streamed to the UI over SSE.</li>
+</ul>
+
+<h2>Under the hood: planning passes</h2>
+<pre>
+            ┌─ principal-engineer persona ─┐        (read-only SDK sessions,
+ Plan ──▶   │  cwd = repo, code-oriented   │──┐      cwd = the managed repo,
+ button     └──────────────────────────────┘  │      Bash allow-list of
+            ┌─ product-manager persona ─────┐ ├──▶  list/view/grep commands,
+            │  cwd = repo, flow-oriented    │─┘      everything else denied)
+            └───────────────────────────────┘
+                          │ two ranked reports (max 5 proposals each)
+                          ▼
+            ┌─ synthesizer session ─────────────────────────────────┐
+            │ merges the two lists like a planning meeting:          │
+            │ duplicates → one item (source "both"), drops anything  │
+            │ serving no goal priority, caps at 9, returns STRICT    │
+            │ JSON: {title, body, labels, source, effort, impact}    │
+            └───────────────────────────────────────────────────────┘
+                          │ proposals stored in &lt;repo&gt;/.orchestrator/planning.json
+                          ▼
+            Planning page: you approve / dismiss each proposal.
+            Approved → `gh issue create` (+ `proposed` label) → appears
+            on the board as a ready card at the next poll.
+</pre>
+<ul>
+  <li><strong>Personas are repo content:</strong> <code>&lt;repo&gt;/.claude/agents/principal-engineer.md</code> and <code>product-manager.md</code> are read at runtime, so each repo tailors its own planning perspective. Both ground themselves in the repo's goal file and the open GitHub backlog (mandatory dedupe) before proposing.</li>
+  <li><strong>Exclusion digest:</strong> every prior proposal (dismissed / pending / filed) is prepended to both persona prompts and to the synthesizer as a backstop, so passes don't re-propose what you already rejected or queued. Dismissed items may only return with explicitly stated new evidence.</li>
+  <li><strong>Models:</strong> planning runs on <code>claude-fable-5</code>; on a usage-limit error it retries once on <code>claude-opus-4-8</code>.</li>
+  <li><strong>Scheduling:</strong> on demand, or auto-run every N hours while the app is running.</li>
+</ul>
+
+<h2>Security model</h2>
+<ul>
+  <li>Server binds <code>127.0.0.1</code> only; a global middleware enforces a localhost Host/Origin check on <em>every</em> API route (including GETs and SSE), closing CSRF and DNS-rebinding paths.</li>
+  <li>Execution agents: worktree-confined file access, command deny-lists, GitHub-only egress. Publishing (push, PR, issue creation) happens only through dashboard actions you click.</li>
+  <li>Planning agents: read-only by construction. No file-writing tools; Bash restricted to list/view/grep-style commands.</li>
+  <li>Auth is delegated: GitHub via your <code>gh</code> login, Claude via your Claude Code login/API key. The orchestrator stores no secrets.</li>
+</ul>
+
+</body>
+</html>

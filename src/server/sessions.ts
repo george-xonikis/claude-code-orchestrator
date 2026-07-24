@@ -11,7 +11,7 @@ import type {
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { LogEvent, Task } from '@/lib/types';
+import type { LogEvent, RepoInfo, Task } from '@/lib/types';
 import { appendMemory, readSettings } from './settings';
 import { buildPrompt } from './task-prompt';
 
@@ -30,6 +30,8 @@ import { buildPrompt } from './task-prompt';
 
 /** Event emitted by a running session: a log line and/or a Task patch (status change, cost, PR, question…). */
 export interface SessionEvent {
+  /** The managed repo this session belongs to — issue numbers are only unique per repo. */
+  repo: RepoInfo;
   issueNumber: number;
   log?: LogEvent;
   patch?: Partial<Task>;
@@ -91,6 +93,7 @@ function createInputQueue(): InputQueue {
 // ---------------------------------------------------------------------------
 
 interface LiveSession {
+  repo: RepoInfo;
   issueNumber: number;
   query: Query;
   input: InputQueue;
@@ -102,8 +105,13 @@ interface LiveSession {
 }
 
 interface SessionsGlobal {
-  sessions: Map<number, LiveSession>;
+  /** Keyed by `${repoId}#${issueNumber}` — issue numbers are not unique across repos. */
+  sessions: Map<string, LiveSession>;
   listeners: Set<SessionEventListener>;
+}
+
+function sessionKey(repoId: string, issueNumber: number): string {
+  return `${repoId}#${issueNumber}`;
 }
 
 const globalRef = globalThis as typeof globalThis & {
@@ -265,10 +273,14 @@ function isOutsideWorktree(rawPath: string, worktreePath: string): boolean {
   return resolved !== worktreePath && !resolved.startsWith(worktreePath + path.sep);
 }
 
-function makeCanUseTool(issueNumber: number, worktreePath: string): CanUseTool {
+function makeCanUseTool(
+  repo: RepoInfo,
+  issueNumber: number,
+  worktreePath: string
+): CanUseTool {
   return async (toolName, input) => {
     const deny = (reason: string, detail: string) => {
-      emit({ issueNumber, log: makeLog('error', `Denied ${detail}`) });
+      emit({ repo, issueNumber, log: makeLog('error', `Denied ${detail}`) });
       return {
         behavior: 'deny' as const,
         message: `This was blocked by the orchestrator: ${reason} are not allowed in agent sessions. Do not retry it — continue the task without it.`,
@@ -312,6 +324,9 @@ function makeCanUseTool(issueNumber: number, worktreePath: string): CanUseTool {
 // ---------------------------------------------------------------------------
 // SDK message → LogEvent mapping
 // ---------------------------------------------------------------------------
+
+/** Model for implementation sessions (planning personas run on Fable in planning.ts). */
+const EXECUTION_MODEL = 'claude-opus-4-8';
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const TEST_COMMAND_PATTERN =
@@ -361,14 +376,16 @@ function collectTextFromToolResultContent(content: unknown): string {
 }
 
 function handleMessage(live: LiveSession, message: SDKMessage): void {
-  const { issueNumber } = live;
+  const { repo, issueNumber } = live;
 
   switch (message.type) {
     case 'system': {
       if (message.subtype === 'init') {
         emit({
+          repo,
           issueNumber,
           log: makeLog('info', `Session started (model: ${message.model})`),
+          patch: { model: message.model },
         });
       }
       break;
@@ -379,13 +396,13 @@ function handleMessage(live: LiveSession, message: SDKMessage): void {
         if (block.type === 'text') {
           scanForPrUrl(live, block.text);
           const text = oneLine(block.text);
-          if (text) emit({ issueNumber, log: makeLog('info', text) });
+          if (text) emit({ repo, issueNumber, log: makeLog('info', text) });
         } else if (block.type === 'tool_use') {
           const log = logForToolUse(
             block.name,
             (block.input ?? {}) as Record<string, unknown>
           );
-          if (log) emit({ issueNumber, log });
+          if (log) emit({ repo, issueNumber, log });
         }
       }
       break;
@@ -410,6 +427,7 @@ function handleMessage(live: LiveSession, message: SDKMessage): void {
             scanForPrUrl(live, text);
             if (toolResult.is_error) {
               emit({
+                repo,
                 issueNumber,
                 log: makeLog('error', `Tool failed: ${oneLine(text)}`),
               });
@@ -453,7 +471,12 @@ function handleMessage(live: LiveSession, message: SDKMessage): void {
         log = makeLog('error', `Session failed: ${errorText}`);
       }
 
-      emit({ issueNumber, log, patch });
+      emit({ repo, issueNumber, log, patch });
+      // The turn is over and the task is terminal (pr_open/committed/failed).
+      // In streaming-input mode the query stays open for more input, so close
+      // it explicitly — otherwise the registry entry lingers and Start/Retry
+      // fails with "a session is already running".
+      live.input.end();
       break;
     }
 
@@ -468,18 +491,22 @@ function handleMessage(live: LiveSession, message: SDKMessage): void {
 
 /** Start an agent session for an issue inside its worktree. Resolves once the session is launched (fire-and-forget). */
 export async function startSession(
+  repo: RepoInfo,
   issueNumber: number,
   worktreePath: string,
-  branch: string
+  branch: string,
+  model?: string,
+  useWorkflow = false
 ): Promise<void> {
   const { sessions } = registry();
-  if (sessions.has(issueNumber)) {
+  const key = sessionKey(repo.id, issueNumber);
+  if (sessions.has(key)) {
     throw new Error(`A session for issue #${issueNumber} is already running`);
   }
 
   const input = createInputQueue();
-  const { goal, memory } = await readSettings();
-  const taskPrompt = buildPrompt(issueNumber, worktreePath, branch, goal, memory);
+  const { goal, memory } = await readSettings(repo.path);
+  const taskPrompt = buildPrompt(issueNumber, worktreePath, branch, goal, memory, useWorkflow);
   input.push({
     type: 'user',
     message: {
@@ -502,7 +529,7 @@ export async function startSession(
             .describe('One specific question for the developer'),
         },
         async ({ question }) => {
-          const live = sessions.get(issueNumber);
+          const live = sessions.get(key);
           if (!live || live.stopped) {
             return {
               content: [
@@ -514,6 +541,7 @@ export async function startSession(
             };
           }
           emit({
+            repo,
             issueNumber,
             log: makeLog('question', oneLine(question, 500)),
             patch: { status: 'needs_input', question },
@@ -522,6 +550,7 @@ export async function startSession(
             live.pendingReply = resolve;
           });
           emit({
+            repo,
             issueNumber,
             log: makeLog('prompt', `Developer reply: ${oneLine(answer, 500)}`),
             patch: { status: 'working', question: undefined },
@@ -536,8 +565,9 @@ export async function startSession(
           lesson: z.string().describe('One concise sentence with the reusable lesson'),
         },
         async ({ lesson }) => {
-          await appendMemory(issueNumber, lesson);
+          await appendMemory(repo.path, issueNumber, lesson);
           emit({
+            repo,
             issueNumber,
             log: makeLog('info', `Memory saved: ${oneLine(lesson, 200)}`),
           });
@@ -551,10 +581,13 @@ export async function startSession(
     prompt: input.iterable,
     options: {
       cwd: worktreePath,
+      // Implementation defaults to Opus (per-task dropdown can override);
+      // planning (PE/PM personas) runs on Fable.
+      model: model ?? EXECUTION_MODEL,
       // No interactive prompts: edits auto-accepted, everything else decided
       // programmatically by canUseTool (allow-all except the deny patterns).
       permissionMode: 'acceptEdits',
-      canUseTool: makeCanUseTool(issueNumber, worktreePath),
+      canUseTool: makeCanUseTool(repo, issueNumber, worktreePath),
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       mcpServers: { orchestrator: askUserServer },
       allowedTools: ['mcp__orchestrator__ask_user', 'mcp__orchestrator__save_memory'],
@@ -563,15 +596,17 @@ export async function startSession(
   });
 
   const live: LiveSession = {
+    repo,
     issueNumber,
     query: q,
     input,
     pendingReply: null,
     stopped: false,
   };
-  sessions.set(issueNumber, live);
+  sessions.set(key, live);
 
   emit({
+    repo,
     issueNumber,
     log: makeLog('info', `Agent session launched on ${branch}`),
     patch: {
@@ -583,7 +618,7 @@ export async function startSession(
     },
   });
   // Also in the chronological log — the developer's request, highlighted.
-  emit({ issueNumber, log: makeLog('prompt', taskPrompt) });
+  emit({ repo, issueNumber, log: makeLog('prompt', taskPrompt) });
 
   void (async () => {
     try {
@@ -597,6 +632,7 @@ export async function startSession(
           500
         );
         emit({
+          repo,
           issueNumber,
           log: makeLog('error', `Session crashed: ${text}`),
           patch: { status: 'failed', error: text },
@@ -604,17 +640,21 @@ export async function startSession(
       }
     } finally {
       live.input.end();
-      if (sessions.get(issueNumber) === live) {
-        sessions.delete(issueNumber);
+      if (sessions.get(key) === live) {
+        sessions.delete(key);
       }
     }
   })();
 }
 
 /** Abort a running (or paused) session and release its slot. */
-export async function stopSession(issueNumber: number): Promise<void> {
+export async function stopSession(
+  repo: RepoInfo,
+  issueNumber: number
+): Promise<void> {
   const { sessions } = registry();
-  const live = sessions.get(issueNumber);
+  const key = sessionKey(repo.id, issueNumber);
+  const live = sessions.get(key);
   if (!live) return;
 
   live.stopped = true;
@@ -629,16 +669,17 @@ export async function stopSession(issueNumber: number): Promise<void> {
     // Already terminated — nothing to clean up.
   }
   live.input.end();
-  sessions.delete(issueNumber);
-  emit({ issueNumber, log: makeLog('info', 'Session stopped') });
+  sessions.delete(key);
+  emit({ repo, issueNumber, log: makeLog('info', 'Session stopped') });
 }
 
 /** Deliver the user's one-turn reply to a session paused in 'needs_input'; resumes it with full context. */
 export async function replySession(
+  repo: RepoInfo,
   issueNumber: number,
   message: string
 ): Promise<void> {
-  const live = registry().sessions.get(issueNumber);
+  const live = registry().sessions.get(sessionKey(repo.id, issueNumber));
   if (!live) {
     throw new Error(`No running session for issue #${issueNumber}`);
   }

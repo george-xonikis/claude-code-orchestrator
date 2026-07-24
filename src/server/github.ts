@@ -1,16 +1,18 @@
 /**
- * GitHub access for the orchestrator (via `gh` CLI against this repo).
+ * GitHub access for the orchestrator (via `gh` CLI against a managed repo).
  *
  * Label loop: agent-ready -> agent-working -> agent-pr / agent-failed
  * (plus agent-needs-input while a session is paused on a question).
  * Only issues labeled agent-ready are ever touched.
  *
  * Relies entirely on the developer's existing `gh` auth — no tokens here.
- * All invocations go through execFile with argument arrays (no shell).
+ * All invocations go through execFile with argument arrays (no shell), with
+ * cwd set to the managed repo so `gh` resolves the right GitHub remote.
  */
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { getDefaultBranch } from './worktrees';
 
 const execFileAsync = promisify(execFile);
 
@@ -38,10 +40,11 @@ const AGENT_LABELS: Record<string, { color: string; description: string }> = {
 
 const AGENT_LABEL_NAMES = Object.keys(AGENT_LABELS);
 
-/** Run `gh` with args (never a shell string) from this package's cwd (inside the repo). */
-async function gh(args: string[]): Promise<string> {
+/** Run `gh` with args (never a shell string) from the managed repo's root. */
+async function gh(repoPath: string, args: string[]): Promise<string> {
   try {
     const { stdout } = await execFileAsync('gh', args, {
+      cwd: repoPath,
       maxBuffer: 10 * 1024 * 1024,
     });
     return stdout;
@@ -54,19 +57,23 @@ async function gh(args: string[]): Promise<string> {
   }
 }
 
-/** Ensure the orchestrator labels exist on the repo (idempotent, once per process). */
-let labelsEnsured: Promise<void> | null = null;
-function ensureAgentLabels(): Promise<void> {
-  labelsEnsured ??= (async () => {
-    for (const [name, { color, description }] of Object.entries(AGENT_LABELS)) {
-      // --force updates in place if the label already exists (no error).
-      await gh(['label', 'create', name, '--force', '--color', color, '--description', description]);
-    }
-  })().catch((err) => {
-    labelsEnsured = null; // allow retry on next call
-    throw err;
-  });
-  return labelsEnsured;
+/** Ensure the orchestrator labels exist on the repo (idempotent, once per repo per process). */
+const labelsEnsured = new Map<string, Promise<void>>();
+function ensureAgentLabels(repoPath: string): Promise<void> {
+  let ensured = labelsEnsured.get(repoPath);
+  if (!ensured) {
+    ensured = (async () => {
+      for (const [name, { color, description }] of Object.entries(AGENT_LABELS)) {
+        // --force updates in place if the label already exists (no error).
+        await gh(repoPath, ['label', 'create', name, '--force', '--color', color, '--description', description]);
+      }
+    })().catch((err) => {
+      labelsEnsured.delete(repoPath); // allow retry on next call
+      throw err;
+    });
+    labelsEnsured.set(repoPath, ensured);
+  }
+  return ensured;
 }
 
 interface IssueJson {
@@ -88,8 +95,8 @@ function toIssue(json: IssueJson): GitHubIssue {
 }
 
 /** List all open issues. */
-export async function listOpenIssues(): Promise<GitHubIssue[]> {
-  const stdout = await gh([
+export async function listOpenIssues(repoPath: string): Promise<GitHubIssue[]> {
+  const stdout = await gh(repoPath, [
     'issue',
     'list',
     '--state',
@@ -107,8 +114,8 @@ export async function listOpenIssues(): Promise<GitHubIssue[]> {
  * Issue comments are appended to `body` under a "## Comments" section so the
  * agent prompt gets the full discussion (the GitHubIssue shape stays as stubbed).
  */
-export async function getIssue(issueNumber: number): Promise<GitHubIssue> {
-  const stdout = await gh([
+export async function getIssue(repoPath: string, issueNumber: number): Promise<GitHubIssue> {
+  const stdout = await gh(repoPath, [
     'issue',
     'view',
     String(issueNumber),
@@ -133,44 +140,78 @@ export async function getIssue(issueNumber: number): Promise<GitHubIssue> {
  * label and adds `labels` in a single `gh issue edit` call (one API mutation).
  * Missing repo labels are created lazily first.
  */
-export async function setLabels(issueNumber: number, labels: string[]): Promise<void> {
-  await ensureAgentLabels();
+export async function setLabels(repoPath: string, issueNumber: number, labels: string[]): Promise<void> {
+  await ensureAgentLabels(repoPath);
   const toRemove = AGENT_LABEL_NAMES.filter((name) => !labels.includes(name));
   const args = ['issue', 'edit', String(issueNumber)];
   for (const name of toRemove) args.push('--remove-label', name);
   for (const name of labels) args.push('--add-label', name);
-  await gh(args);
+  await gh(repoPath, args);
 }
 
 /** Post a comment on an issue (e.g. failure summary, PR link). */
-export async function commentOnIssue(issueNumber: number, body: string): Promise<void> {
-  await gh(['issue', 'comment', String(issueNumber), '--body', body]);
+export async function commentOnIssue(repoPath: string, issueNumber: number, body: string): Promise<void> {
+  await gh(repoPath, ['issue', 'comment', String(issueNumber), '--body', body]);
+}
+
+/** Raw title/body of one issue (for editing — no comments appended). */
+export async function getIssueDetails(
+  repoPath: string,
+  issueNumber: number
+): Promise<{ title: string; body: string }> {
+  const stdout = await gh(repoPath, [
+    'issue',
+    'view',
+    String(issueNumber),
+    '--json',
+    'title,body',
+  ]);
+  const json = JSON.parse(stdout) as { title: string; body: string | null };
+  return { title: json.title, body: json.body ?? '' };
+}
+
+/** Edit an issue's title and/or body on GitHub. */
+export async function editIssue(
+  repoPath: string,
+  issueNumber: number,
+  patch: { title?: string; body?: string }
+): Promise<void> {
+  const args = ['issue', 'edit', String(issueNumber)];
+  if (patch.title !== undefined) args.push('--title', patch.title);
+  if (patch.body !== undefined) args.push('--body', patch.body);
+  if (args.length === 3) return;
+  await gh(repoPath, args);
 }
 
 /** Create a GitHub issue (planning-pass approvals). Ensures the `proposed` label exists. */
-let proposedLabelEnsured: Promise<void> | null = null;
+const proposedLabelEnsured = new Map<string, Promise<void>>();
 export async function createIssue(
+  repoPath: string,
   title: string,
   body: string,
   labels: string[]
 ): Promise<{ number: number; url: string }> {
-  proposedLabelEnsured ??= gh([
-    'label',
-    'create',
-    'proposed',
-    '--force',
-    '--color',
-    'BFD4F2',
-    '--description',
-    'Proposed by a planning pass, pending pickup',
-  ]).then(() => undefined);
-  await proposedLabelEnsured.catch(() => {
-    proposedLabelEnsured = null;
+  let ensured = proposedLabelEnsured.get(repoPath);
+  if (!ensured) {
+    ensured = gh(repoPath, [
+      'label',
+      'create',
+      'proposed',
+      '--force',
+      '--color',
+      'BFD4F2',
+      '--description',
+      'Proposed by a planning pass, pending pickup',
+    ]).then(() => undefined);
+    proposedLabelEnsured.set(repoPath, ensured);
+  }
+  await ensured.catch(() => {
+    proposedLabelEnsured.delete(repoPath);
   });
 
   const args = ['issue', 'create', '--title', title, '--body', body];
   for (const label of labels) args.push('--label', label);
-  const stdout = await gh(args);
+  const stdout = await gh(repoPath, args);
   const url = stdout.trim().split('\n').pop() ?? '';
   const match = url.match(/\/issues\/(\d+)/);
   if (!match) {
@@ -181,15 +222,17 @@ export async function createIssue(
 
 /** Open a PR for a pushed branch (developer-triggered from the dashboard). */
 export async function createPullRequest(
+  repoPath: string,
   issueNumber: number,
   branch: string,
   title: string
 ): Promise<GitHubPullRequest> {
-  const stdout = await gh([
+  const base = await getDefaultBranch(repoPath);
+  const stdout = await gh(repoPath, [
     'pr',
     'create',
     '--base',
-    'master',
+    base,
     '--head',
     branch,
     '--title',
@@ -206,8 +249,8 @@ export async function createPullRequest(
 }
 
 /** Find an open PR whose head branch matches, or null if none exists. */
-export async function findOpenPrForBranch(branch: string): Promise<GitHubPullRequest | null> {
-  const stdout = await gh([
+export async function findOpenPrForBranch(repoPath: string, branch: string): Promise<GitHubPullRequest | null> {
+  const stdout = await gh(repoPath, [
     'pr',
     'list',
     '--head',

@@ -3,26 +3,23 @@ import * as path from 'node:path';
 import type { LogEvent, Task } from '@/lib/types';
 
 /**
- * Orchestrator state store.
+ * Orchestrator state store (per managed repo).
  *
- * Persistent state lives in <repo-root>/.orchestrator/state.json; per-issue JSONL
- * logs in <repo-root>/.orchestrator/logs/issue-{n}.jsonl (both git-ignored).
+ * Persistent state lives in <repoPath>/.orchestrator/state.json; per-issue JSONL
+ * logs in <repoPath>/.orchestrator/logs/issue-{n}.jsonl (both git-ignored).
  *
- * The in-memory store + subscriber sets are lazily initialized behind a
- * globalThis guard so Next dev hot-reload doesn't duplicate them.
+ * The in-memory stores (one per repo path) + subscriber sets are lazily
+ * initialized behind a globalThis guard so Next dev hot-reload doesn't
+ * duplicate them.
  *
  * Persistence notes:
  * - state.json is written atomically (temp file + rename), writes serialized
- *   through a promise chain.
+ *   through a per-repo promise chain.
  * - Task.logTail is NOT persisted in state.json (the JSONL files are the source
  *   of truth); it is rebuilt from the log files during hydration and kept
  *   up-to-date in memory by appendLog().
  */
 
-const REPO_ROOT = '/Users/george-xon/Downloads/Git/nous-ai';
-const ORCH_DIR = path.join(REPO_ROOT, '.orchestrator');
-const STATE_FILE = path.join(ORCH_DIR, 'state.json');
-const LOGS_DIR = path.join(ORCH_DIR, 'logs');
 const DEFAULT_TAIL_LINES = 200;
 
 type TaskListener = (tasks: Task[]) => void;
@@ -37,24 +34,39 @@ interface StateGlobal {
 }
 
 const globalRef = globalThis as typeof globalThis & {
-  __orchestratorState?: StateGlobal;
+  __orchestratorState?: Map<string, StateGlobal>;
 };
 
-function store(): StateGlobal {
-  if (!globalRef.__orchestratorState) {
-    globalRef.__orchestratorState = {
+function store(repoPath: string): StateGlobal {
+  globalRef.__orchestratorState ??= new Map();
+  let s = globalRef.__orchestratorState.get(repoPath);
+  if (!s) {
+    s = {
       tasks: new Map(),
       subscribers: new Set(),
       logSubscribers: new Map(),
       hydration: null,
       writeChain: Promise.resolve(),
     };
+    globalRef.__orchestratorState.set(repoPath, s);
   }
-  return globalRef.__orchestratorState;
+  return s;
 }
 
-function logFile(issueNumber: number): string {
-  return path.join(LOGS_DIR, `issue-${issueNumber}.jsonl`);
+function orchDir(repoPath: string): string {
+  return path.join(repoPath, '.orchestrator');
+}
+
+function stateFile(repoPath: string): string {
+  return path.join(orchDir(repoPath), 'state.json');
+}
+
+function logsDir(repoPath: string): string {
+  return path.join(orchDir(repoPath), 'logs');
+}
+
+function logFile(repoPath: string, issueNumber: number): string {
+  return path.join(logsDir(repoPath), `issue-${issueNumber}.jsonl`);
 }
 
 /** Render one LogEvent to a display line (used for Task.logTail). */
@@ -67,11 +79,11 @@ function renderLogLine(event: LogEvent): string {
 // Hydration + persistence
 // ---------------------------------------------------------------------------
 
-async function hydrate(): Promise<void> {
-  const s = store();
+async function hydrate(repoPath: string): Promise<void> {
+  const s = store(repoPath);
   let raw: string;
   try {
-    raw = await fsp.readFile(STATE_FILE, 'utf8');
+    raw = await fsp.readFile(stateFile(repoPath), 'utf8');
   } catch {
     return; // No state yet — first run.
   }
@@ -85,19 +97,19 @@ async function hydrate(): Promise<void> {
     return; // Corrupt state file — start fresh (logs on disk are untouched).
   }
   for (const task of s.tasks.values()) {
-    task.logTail = await readLogTail(task.issueNumber);
+    task.logTail = await readLogTail(repoPath, task.issueNumber);
   }
 }
 
-function ensureHydrated(): Promise<void> {
-  const s = store();
-  s.hydration ??= hydrate();
+function ensureHydrated(repoPath: string): Promise<void> {
+  const s = store(repoPath);
+  s.hydration ??= hydrate(repoPath);
   return s.hydration;
 }
 
 /** Atomic, serialized write of state.json (logTail excluded). */
-function persist(): void {
-  const s = store();
+function persist(repoPath: string): void {
+  const s = store(repoPath);
   const tasks = [...s.tasks.values()]
     .sort((a, b) => a.issueNumber - b.issueNumber)
     .map((task) => {
@@ -108,18 +120,19 @@ function persist(): void {
   const payload = JSON.stringify({ tasks }, null, 2);
   s.writeChain = s.writeChain
     .then(async () => {
-      await fsp.mkdir(ORCH_DIR, { recursive: true });
-      const tmp = `${STATE_FILE}.tmp`;
+      await fsp.mkdir(orchDir(repoPath), { recursive: true });
+      const file = stateFile(repoPath);
+      const tmp = `${file}.tmp`;
       await fsp.writeFile(tmp, payload, 'utf8');
-      await fsp.rename(tmp, STATE_FILE);
+      await fsp.rename(tmp, file);
     })
     .catch((err) => {
       console.error('[orchestrator] failed to persist state.json:', err);
     });
 }
 
-function snapshot(): Task[] {
-  return [...store().tasks.values()]
+function snapshot(repoPath: string): Task[] {
+  return [...store(repoPath).tasks.values()]
     .sort((a, b) => a.issueNumber - b.issueNumber)
     .map((task) => ({
       ...task,
@@ -127,9 +140,9 @@ function snapshot(): Task[] {
     }));
 }
 
-function notifySubscribers(): void {
-  const tasks = snapshot();
-  for (const listener of store().subscribers) {
+function notifySubscribers(repoPath: string): void {
+  const tasks = snapshot(repoPath);
+  for (const listener of store(repoPath).subscribers) {
     try {
       listener(tasks);
     } catch {
@@ -142,10 +155,10 @@ function notifySubscribers(): void {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Current snapshot of all tasks (loaded from state.json on first access). */
-export async function getTasks(): Promise<Task[]> {
-  await ensureHydrated();
-  return snapshot();
+/** Current snapshot of a repo's tasks (loaded from state.json on first access). */
+export async function getTasks(repoPath: string): Promise<Task[]> {
+  await ensureHydrated(repoPath);
+  return snapshot(repoPath);
 }
 
 /**
@@ -153,9 +166,12 @@ export async function getTasks(): Promise<Task[]> {
  * A key explicitly present with value `undefined` CLEARS that field (e.g.
  * `{ question: undefined }` on resume). Returns the merged task.
  */
-export async function upsertTask(patch: Partial<Task> & { issueNumber: number }): Promise<Task> {
-  await ensureHydrated();
-  const s = store();
+export async function upsertTask(
+  repoPath: string,
+  patch: Partial<Task> & { issueNumber: number }
+): Promise<Task> {
+  await ensureHydrated(repoPath);
+  const s = store(repoPath);
   let task = s.tasks.get(patch.issueNumber);
   if (!task) {
     task = { issueNumber: patch.issueNumber, title: '', status: 'ready' };
@@ -171,45 +187,49 @@ export async function upsertTask(patch: Partial<Task> & { issueNumber: number })
     }
   }
   task.updatedAt = new Date().toISOString();
-  persist();
-  notifySubscribers();
+  persist(repoPath);
+  notifySubscribers(repoPath);
   return { ...task, logTail: task.logTail ? [...task.logTail] : undefined };
 }
 
 /** Remove a task (its issue is no longer discovered as ready), persist, notify. */
-export async function removeTask(issueNumber: number): Promise<void> {
-  await ensureHydrated();
-  const s = store();
+export async function removeTask(repoPath: string, issueNumber: number): Promise<void> {
+  await ensureHydrated(repoPath);
+  const s = store(repoPath);
   if (!s.tasks.delete(issueNumber)) return;
-  persist();
-  notifySubscribers();
+  persist(repoPath);
+  notifySubscribers(repoPath);
 }
 
 /**
- * Subscribe to full Task[] snapshots on any change (backs GET /api/events).
- * Returns an unsubscribe function.
+ * Subscribe to full Task[] snapshots for one repo on any change (backs
+ * GET /api/events?repo=). Returns an unsubscribe function.
  */
-export function subscribe(listener: (tasks: Task[]) => void): () => void {
-  const s = store();
+export function subscribe(repoPath: string, listener: (tasks: Task[]) => void): () => void {
+  const s = store(repoPath);
   s.subscribers.add(listener);
   return () => {
     s.subscribers.delete(listener);
   };
 }
 
-/** Append one event to .orchestrator/logs/issue-{n}.jsonl and notify log streams. */
-export async function appendLog(issueNumber: number, event: LogEvent): Promise<void> {
-  await ensureHydrated();
-  const s = store();
+/** Append one event to <repoPath>/.orchestrator/logs/issue-{n}.jsonl and notify log streams. */
+export async function appendLog(
+  repoPath: string,
+  issueNumber: number,
+  event: LogEvent
+): Promise<void> {
+  await ensureHydrated(repoPath);
+  const s = store(repoPath);
 
-  await fsp.mkdir(LOGS_DIR, { recursive: true });
-  await fsp.appendFile(logFile(issueNumber), `${JSON.stringify(event)}\n`, 'utf8');
+  await fsp.mkdir(logsDir(repoPath), { recursive: true });
+  await fsp.appendFile(logFile(repoPath, issueNumber), `${JSON.stringify(event)}\n`, 'utf8');
 
   // Keep the in-memory logTail current (not persisted; rebuilt on hydrate).
   const task = s.tasks.get(issueNumber);
   if (task) {
     task.logTail = [...(task.logTail ?? []), renderLogLine(event)].slice(-DEFAULT_TAIL_LINES);
-    notifySubscribers();
+    notifySubscribers(repoPath);
   }
 
   const listeners = s.logSubscribers.get(issueNumber);
@@ -225,11 +245,15 @@ export async function appendLog(issueNumber: number, event: LogEvent): Promise<v
 }
 
 /**
- * Subscribe to live LogEvents for one issue (backs GET /api/tasks/[n]/logs).
- * Returns an unsubscribe function.
+ * Subscribe to live LogEvents for one issue in one repo (backs
+ * GET /api/tasks/[n]/logs?repo=). Returns an unsubscribe function.
  */
-export function subscribeLogs(issueNumber: number, listener: LogListener): () => void {
-  const s = store();
+export function subscribeLogs(
+  repoPath: string,
+  issueNumber: number,
+  listener: LogListener
+): () => void {
+  const s = store(repoPath);
   let listeners = s.logSubscribers.get(issueNumber);
   if (!listeners) {
     listeners = new Set();
@@ -246,12 +270,13 @@ export function subscribeLogs(issueNumber: number, listener: LogListener): () =>
 
 /** Read the last `maxLines` raw LogEvents for an issue (SSE replay). */
 export async function readLogEvents(
+  repoPath: string,
   issueNumber: number,
   maxLines = DEFAULT_TAIL_LINES
 ): Promise<LogEvent[]> {
   let raw: string;
   try {
-    raw = await fsp.readFile(logFile(issueNumber), 'utf8');
+    raw = await fsp.readFile(logFile(repoPath, issueNumber), 'utf8');
   } catch {
     return [];
   }
@@ -270,9 +295,10 @@ export async function readLogEvents(
 
 /** Read the last `maxLines` formatted log lines for an issue (for Task.logTail). */
 export async function readLogTail(
+  repoPath: string,
   issueNumber: number,
   maxLines = DEFAULT_TAIL_LINES
 ): Promise<string[]> {
-  const events = await readLogEvents(issueNumber, maxLines);
+  const events = await readLogEvents(repoPath, issueNumber, maxLines);
   return events.map(renderLogLine);
 }

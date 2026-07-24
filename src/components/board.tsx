@@ -6,6 +6,8 @@ import { RefreshCw, Search } from 'lucide-react';
 import type { Task, TaskStatus } from '@/lib/types';
 import { LABEL_COLORS } from '@/components/shared/label-chip';
 import { countActiveSessions, pollNow, stopAllTasks } from '@/components/shared/task-actions';
+import { AddRepoModal } from '@/components/add-repo-modal';
+import { useRepo } from '@/components/shared/use-repo';
 import { useTasks } from '@/components/shared/use-tasks';
 import { TaskCard } from '@/components/task-card';
 
@@ -37,6 +39,8 @@ function displayLabels(task: Task): string[] {
 }
 
 export function Board() {
+  const { repos, current, loaded } = useRepo();
+  const [addingRepo, setAddingRepo] = useState(false);
   const { tasks } = useTasks();
   const [query, setQuery] = useState('');
   const [polling, setPolling] = useState(false);
@@ -46,15 +50,17 @@ export function Board() {
   const activeSessions = countActiveSessions(tasks);
 
   const handlePollNow = () => {
+    if (!current) return;
     setPolling(true);
-    pollNow()
+    pollNow(current.id)
       .catch(() => {})
       .finally(() => setPolling(false));
   };
 
   const handleStopAll = () => {
+    if (!current) return;
     setStopping(true);
-    stopAllTasks(tasks)
+    stopAllTasks(current.id, tasks)
       .catch(() => {})
       .finally(() => setStopping(false));
   };
@@ -67,6 +73,29 @@ export function Board() {
       return next;
     });
   };
+
+  // No repos registered yet — offer the add flow instead of an empty board.
+  if (loaded && repos.length === 0) {
+    return (
+      <div className="flex h-[calc(100dvh-57px)] items-center justify-center p-4">
+        <div className="flex w-full max-w-sm flex-col items-center gap-3 rounded-lg bg-elevated-secondary p-8 text-center">
+          <h2 className="text-sm font-bold">Add a repository</h2>
+          <p className="text-xs leading-5 text-muted-foreground">
+            Register a local git repo (with a GitHub remote) to manage its issues and agent
+            sessions here.
+          </p>
+          <button
+            type="button"
+            onClick={() => setAddingRepo(true)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:opacity-90"
+          >
+            + Add repo
+          </button>
+          {addingRepo && <AddRepoModal onClose={() => setAddingRepo(false)} />}
+        </div>
+      </div>
+    );
+  }
 
   // Newest issues (highest number) first in every column.
   const visible = tasks

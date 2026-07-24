@@ -5,6 +5,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { getSettings, saveSettings } from '@/components/shared/task-actions';
+import { useRepo } from '@/components/shared/use-repo';
 
 /** "Edit" label + pill switch, matching the main app's agent-instructions editor. */
 function EditToggle({ editing, onChange }: { editing: boolean; onChange: (v: boolean) => void }) {
@@ -109,19 +110,40 @@ function SettingsSection({
 }
 
 export function SettingsPage() {
+  const { current, loaded: reposLoaded } = useRepo();
+  const repoId = current?.id ?? null;
   const [goal, setGoal] = useState('');
   const [memory, setMemory] = useState('');
   const [loaded, setLoaded] = useState(false);
 
+  // Reset during render when the selected repo changes (React's derived-state
+  // pattern), so the effect below only refetches.
+  const [loadedRepoId, setLoadedRepoId] = useState(repoId);
+  if (loadedRepoId !== repoId) {
+    setLoadedRepoId(repoId);
+    setGoal('');
+    setMemory('');
+    setLoaded(false);
+  }
+
   useEffect(() => {
-    getSettings()
+    if (!repoId) return;
+    getSettings(repoId)
       .then((settings) => {
         setGoal(settings.goal);
         setMemory(settings.memory);
       })
       .catch(() => {})
       .finally(() => setLoaded(true));
-  }, []);
+  }, [repoId]);
+
+  if (reposLoaded && !current) {
+    return (
+      <div className="p-6 text-sm text-muted-foreground">
+        Add a repository on the board to edit its goal and memory.
+      </div>
+    );
+  }
 
   if (!loaded) {
     return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
@@ -136,7 +158,7 @@ export function SettingsPage() {
         minHeightClass="min-h-56 max-h-[32rem]"
         placeholder="e.g. Nous is a knowledge platform for SMEs. Current priority: …"
         onChange={setGoal}
-        onSave={() => saveSettings({ goal })}
+        onSave={() => (repoId ? saveSettings(repoId, { goal }) : Promise.resolve())}
       />
       <SettingsSection
         title="Memory"
@@ -145,7 +167,7 @@ export function SettingsPage() {
         minHeightClass="min-h-72 max-h-[36rem]"
         placeholder="- [#312] The pre-commit hook requires all modified backend files staged…"
         onChange={setMemory}
-        onSave={() => saveSettings({ memory })}
+        onSave={() => (repoId ? saveSettings(repoId, { memory }) : Promise.resolve())}
       />
     </div>
   );
