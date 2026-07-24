@@ -600,8 +600,30 @@ export async function discussProposal(
     ],
   });
 
-  return runPlanningQuery(repo.path, discussionPrompt(proposal, goal, messages), {
+  const reply = await runPlanningQuery(repo.path, discussionPrompt(proposal, goal, messages), {
     mcpServers: { orchestrator: tools },
     allowedTools: ['mcp__orchestrator__update_proposal', 'mcp__orchestrator__create_proposal'],
+  });
+
+  // Persist the full transcript (incoming turns + this reply) onto the proposal
+  // so it survives refresh/navigation. updatePass reloads the store, so this is
+  // safe against any proposal edits the tools applied mid-turn.
+  await updatePass(repo.path, passId, (p) => {
+    const target = p.proposals.find((x) => x.id === proposalId);
+    if (target) target.discussion = [...messages, { role: 'assistant', text: reply }];
+  });
+
+  return reply;
+}
+
+/** Clear a proposal's persisted discussion transcript. */
+export async function clearProposalDiscussion(
+  repo: RepoInfo,
+  passId: string,
+  proposalId: string
+): Promise<void> {
+  await updatePass(repo.path, passId, (pass) => {
+    const target = pass.proposals.find((p) => p.id === proposalId);
+    if (target) target.discussion = [];
   });
 }

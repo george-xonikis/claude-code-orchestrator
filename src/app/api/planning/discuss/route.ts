@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { discussProposal, type DiscussionMessage } from '@/server/planning';
+import { clearProposalDiscussion, discussProposal, type DiscussionMessage } from '@/server/planning';
 
 function isMessage(value: unknown): value is DiscussionMessage {
   const m = value as DiscussionMessage;
@@ -33,6 +33,28 @@ export async function POST(request: Request) {
     }
     const reply = await discussProposal(repo, body.passId, body.proposalId, body.messages);
     return NextResponse.json({ reply });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+/** DELETE /api/planning/discuss?repo= {passId, proposalId} -> clear the transcript. */
+export async function DELETE(request: Request) {
+  const forbidden = rejectNonLocal(request);
+  if (forbidden) return forbidden;
+  const repo = await resolveRepo(request);
+  if (repo instanceof NextResponse) return repo;
+
+  try {
+    const body = (await request.json().catch(() => null)) as {
+      passId?: unknown;
+      proposalId?: unknown;
+    } | null;
+    if (!body || typeof body.passId !== 'string' || typeof body.proposalId !== 'string') {
+      return badRequest('Provide passId and proposalId');
+    }
+    await clearProposalDiscussion(repo, body.passId, body.proposalId);
+    return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err);
   }

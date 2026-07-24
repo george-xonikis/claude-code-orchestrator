@@ -52,6 +52,12 @@ export interface Task {
 }
 
 /** One task proposal produced by a planning pass (engineer + PM agents → synthesis). */
+/** One turn in a proposal's "Discuss with Claude Code" transcript. */
+export interface DiscussionMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
 export interface PlanningProposal {
   id: string;
   title: string;
@@ -66,6 +72,8 @@ export interface PlanningProposal {
   status: 'pending' | 'filed' | 'dismissed';
   issueNumber?: number;
   issueUrl?: string;
+  /** Persisted discussion transcript, so it survives refresh/navigation. */
+  discussion?: DiscussionMessage[];
 }
 
 /** One captured line of a planning pass's live agent activity. */

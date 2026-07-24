@@ -5,12 +5,10 @@
  * text for the `update_proposal` / `create_proposal` MCP tools that turn exposes.
  */
 
-import type { PlanningProposal } from '@/lib/types';
+import type { DiscussionMessage, PlanningProposal } from '@/lib/types';
 
-export interface DiscussionMessage {
-  role: 'user' | 'assistant';
-  text: string;
-}
+// Re-exported so existing importers (prompts/index, server/planning) keep working.
+export type { DiscussionMessage };
 
 export function discussionPrompt(
   proposal: PlanningProposal,
@@ -26,11 +24,18 @@ export function discussionPrompt(
     'proposal is about — read code (read-only) to verify claims when the',
     'discussion needs evidence. Agree or push back on the merits, not to please.',
     '',
-    'BE BRIEF. This is a chat, not a document. Default to 2-4 short sentences.',
-    'Lead with the answer, then at most one line of reasoning. Only go longer',
-    'when the developer explicitly asks you to expand or elaborate. Use a short',
-    'bulleted list ONLY when comparing 2-3 concrete options; never use headings,',
-    'preamble, or a summary/recap. Cut filler ("Great question", "In summary").',
+    'BE BRIEF AND SCANNABLE. This is a chat, not a document. Aim for ~2-5 short',
+    'sentences; only go longer when the developer explicitly asks you to expand.',
+    'Lead with a one-line answer first, then the supporting detail.',
+    'Formatting for readability:',
+    '- Prefer short bullet points ("- ...") over dense paragraphs whenever you',
+    '  list more than one thing (options, steps, findings, trade-offs).',
+    '- Use a few tasteful emoji as visual anchors — e.g. ✅ agree / good,',
+    '  ⚠️ caveat or risk, 🔧 code change, 💡 suggestion, ❓ open question. One per',
+    '  line at most; never decorate every word.',
+    '- Put file/symbol references in `backticks`. Bold the key phrase of a bullet',
+    '  when it helps scanning, but keep it light.',
+    'No preamble or recap, and cut filler ("Great question", "In summary").',
     '',
     'Tools:',
     '- `update_proposal` — apply changes the two of you agree on (partial:',

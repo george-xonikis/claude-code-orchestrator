@@ -9,6 +9,7 @@ import {
   DollarSign,
   Hammer,
   Sparkles,
+  Trash2,
   X,
 } from 'lucide-react';
 
@@ -19,6 +20,7 @@ import type { PlanningLogLine, PlanningPass, PlanningProposal } from '@/lib/type
 import { ClaudeLogo } from '@/components/shared/claude-logo';
 import { LabelChip } from '@/components/shared/label-chip';
 import {
+  clearProposalDiscussion,
   discussProposal,
   dismissPlanningProposals,
   type DiscussionMessage,
@@ -121,7 +123,7 @@ function ProposalCard({
 
   return (
     <div
-      className={`rounded-lg border p-4 ${
+      className={`group rounded-lg border p-4 ${
         proposal.status === 'dismissed'
           ? 'border-border opacity-50'
           : selected
@@ -192,7 +194,7 @@ function ProposalCard({
             <button
               type="button"
               onClick={onDiscuss}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#D97757]/40 bg-[#D97757]/10 px-4 text-sm font-semibold text-foreground transition-colors hover:bg-[#D97757]/20"
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#D97757]/40 bg-[#D97757]/10 px-4 text-sm font-semibold text-foreground opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:bg-[#D97757]/20"
             >
               <ClaudeLogo className="h-4 w-4 text-[#D97757]" />
               Claude
@@ -504,6 +506,7 @@ export function PlanningPage() {
       </div>
       {repoId && discussing && (
         <DiscussDrawer
+          key={discussing.proposalId}
           repoId={repoId}
           passId={discussing.passId}
           proposal={
@@ -521,9 +524,11 @@ export function PlanningPage() {
 }
 
 /**
- * Chat drawer for one proposal. The transcript lives in this component (cleared
- * on close); each send is one stateless server turn that may apply proposal
- * edits through the update_proposal / create_proposal tools.
+ * Chat drawer for one proposal. The transcript is hydrated from the proposal's
+ * persisted `discussion` on mount and re-persisted server-side after each turn,
+ * so it survives refresh/navigation. Keyed by proposalId so switching proposals
+ * remounts with the right transcript. Each send is one server turn that may
+ * apply proposal edits through the update_proposal / create_proposal tools.
  */
 function DiscussDrawer({
   repoId,
@@ -540,7 +545,11 @@ function DiscussDrawer({
   onProposalChanged: () => void;
   onClose: () => void;
 }) {
-  const [messages, setMessages] = useState<DiscussionMessage[]>([]);
+  // Hydrate from the proposal's persisted transcript so a refresh/navigation
+  // (which remounts this drawer) restores the discussion instead of losing it.
+  const [messages, setMessages] = useState<DiscussionMessage[]>(
+    () => proposal?.discussion ?? []
+  );
   const [draft, setDraft] = useState('');
   const [thinking, setThinking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -570,8 +579,21 @@ function DiscussDrawer({
       .finally(() => setThinking(false));
   };
 
+  const clear = () => {
+    if (thinking || messages.length === 0) return;
+    setMessages([]);
+    clearProposalDiscussion(repoId, passId, proposalId)
+      .then(onProposalChanged)
+      .catch(() => {
+        // Non-fatal: the local view is already cleared; surface it inline.
+        setMessages([
+          { role: 'assistant', text: 'Could not clear the saved transcript — try again.' },
+        ]);
+      });
+  };
+
   return (
-    <aside className="sticky top-20 flex h-[calc(100dvh-7.5rem)] w-[26rem] shrink-0 flex-col self-start rounded-lg border border-border bg-main-surface-primary">
+    <aside className="sticky top-20 flex h-[calc(100dvh-6rem)] w-[26rem] shrink-0 flex-col self-start rounded-lg border border-border bg-main-surface-primary">
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0">
           <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -579,14 +601,26 @@ function DiscussDrawer({
           </div>
           <div className="text-sm font-semibold leading-snug">{proposal?.title ?? proposalId}</div>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close discussion"
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md hover:bg-background-hover"
-        >
-          <X className="h-4 w-4" />
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={clear}
+            disabled={thinking || messages.length === 0}
+            aria-label="Clear discussion"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-background-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Clear
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close discussion"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-background-hover"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       </div>
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 && (

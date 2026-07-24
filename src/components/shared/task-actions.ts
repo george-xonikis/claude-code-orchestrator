@@ -1,4 +1,7 @@
-import type { PlanningPass, Task, TaskStatus } from '@/lib/types';
+import type { DiscussionMessage, PlanningPass, Task, TaskStatus } from '@/lib/types';
+
+// Re-exported so existing importers keep resolving it from this module.
+export type { DiscussionMessage };
 
 /** Statuses with a live session (a paused question keeps its session alive). */
 export const ACTIVE_STATUSES: readonly TaskStatus[] = ['working', 'needs_input'];
@@ -129,12 +132,7 @@ export function saveTicketSettings(
   return post(`/api/tasks/${issueNumber}/settings${repoQuery(repoId)}`, patch);
 }
 
-export interface DiscussionMessage {
-  role: 'user' | 'assistant';
-  text: string;
-}
-
-/** One discussion turn about a proposal; the transcript is client-held. */
+/** One discussion turn about a proposal; the transcript is persisted server-side. */
 export async function discussProposal(
   repoId: string,
   passId: string,
@@ -151,6 +149,23 @@ export async function discussProposal(
     throw new Error(body?.error ?? `discussion failed with ${res.status}`);
   }
   return ((await res.json()) as { reply: string }).reply;
+}
+
+/** Clear a proposal's persisted discussion transcript. */
+export async function clearProposalDiscussion(
+  repoId: string,
+  passId: string,
+  proposalId: string
+): Promise<void> {
+  const res = await fetch(`/api/planning/discuss${repoQuery(repoId)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ passId, proposalId }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `clear failed with ${res.status}`);
+  }
 }
 
 export function filePlanningProposals(
