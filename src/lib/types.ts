@@ -92,6 +92,8 @@ export interface PlanningPass {
   status: 'running' | 'complete' | 'failed';
   error?: string;
   proposals: PlanningProposal[];
+  /** Which agents this pass ran (absent on legacy passes → assume both). */
+  roles?: ('engineer' | 'pm')[];
   /** Streamed engineer/PM/synthesis activity, kept so the pass log stays viewable when done. */
   logs?: PlanningLogLine[];
 }

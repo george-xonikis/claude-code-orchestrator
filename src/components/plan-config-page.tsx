@@ -9,11 +9,14 @@ import {
   GradeMeterInput,
   IMPACT_METER,
 } from '@/components/shared/grade-meter';
+import { MarkdownEditorSection } from '@/components/shared/markdown-editor-section';
 import {
   getPlanningConfig,
+  getSettings,
   MAX_PLANNING_TOPICS,
   type PlanningConfig,
   type PlanningRole,
+  saveSettings,
   setPlanningConfig,
 } from '@/components/shared/task-actions';
 import { useRepo } from '@/components/shared/use-repo';
@@ -74,7 +77,7 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <label className="flex items-center justify-between gap-3">
+    <label className="flex min-h-9 items-center justify-between gap-4">
       <span className="text-xs font-medium">
         {label}
         {hint && <span className="ml-1 text-muted-foreground">— {hint}</span>}
@@ -110,14 +113,15 @@ function NumberSelect({
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-lg bg-elevated-secondary p-5">
+    <section className="rounded-lg bg-elevated-secondary p-6">
       <h2 className="text-sm font-bold">{title}</h2>
-      <div className="mt-3 flex flex-col gap-3">{children}</div>
+      <div className="mt-4 flex flex-col gap-4">{children}</div>
     </section>
   );
 }
 
 const TABS = [
+  { value: 'goal', label: 'Goal' },
   { value: 'agents', label: 'Agents' },
   { value: 'automation', label: 'Automation' },
   { value: 'proposals', label: 'Proposals' },
@@ -129,20 +133,25 @@ export function PlanConfigPage() {
   const { current, loaded: reposLoaded } = useRepo();
   const repoId = current?.id ?? null;
   const [cfg, setCfg] = useState<PlanningConfig | null>(null);
+  const [goal, setGoal] = useState('');
   const [topicDraft, setTopicDraft] = useState('');
-  const [tab, setTab] = useState<ConfigTab>('agents');
+  const [tab, setTab] = useState<ConfigTab>('goal');
 
   // Reset during render when the repo changes (derived-state pattern).
   const [loadedRepoId, setLoadedRepoId] = useState(repoId);
   if (loadedRepoId !== repoId) {
     setLoadedRepoId(repoId);
     setCfg(null);
+    setGoal('');
     setTopicDraft('');
   }
 
   useEffect(() => {
     if (!repoId) return;
     getPlanningConfig(repoId).then(setCfg).catch(() => {});
+    getSettings(repoId)
+      .then((s) => setGoal(s.goal))
+      .catch(() => {});
   }, [repoId]);
 
   /** Optimistically apply a patch and persist it (server echoes the sanitized config). */
@@ -243,6 +252,18 @@ export function PlanConfigPage() {
         </nav>
 
         <div className="flex min-w-0 flex-1 flex-col gap-6">
+          {tab === 'goal' && (
+            <MarkdownEditorSection
+              title="Goal"
+              description="Steers this repo's planning and every agent session — vision, current priorities, what “done well” means. Stored in .orchestrator/goal.md."
+              value={goal}
+              minHeightClass="min-h-56 max-h-[32rem]"
+              placeholder="e.g. Nous is a knowledge platform for SMEs. Current priority: …"
+              onChange={setGoal}
+              onSave={() => (repoId ? saveSettings(repoId, { goal }) : Promise.resolve())}
+            />
+          )}
+
           {tab === 'agents' && (
             <Section title="Agents">
               <p className="text-xs text-muted-foreground">

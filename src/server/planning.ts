@@ -535,6 +535,7 @@ export async function startPlanningPass(
     id: `pass-${Date.now()}`,
     startedAt: new Date().toISOString(),
     status: 'running',
+    roles,
     proposals: [],
   };
   // Digest of prior proposals (before this pass) so agents skip re-proposing them.

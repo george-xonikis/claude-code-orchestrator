@@ -19,7 +19,6 @@ import type { PlanningLogLine, PlanningPass, PlanningProposal } from '@/lib/type
 import { ClaudeLogo } from '@/components/shared/claude-logo';
 import { EFFORT_METER, GradeMeter, IMPACT_METER } from '@/components/shared/grade-meter';
 import { LabelChip } from '@/components/shared/label-chip';
-import { MarkdownEditorSection } from '@/components/shared/markdown-editor-section';
 import {
   cancelPlanningPass,
   clearProposalDiscussion,
@@ -29,10 +28,8 @@ import {
   filePlanningProposals,
   getPlanning,
   getPlanningConfig,
-  getSettings,
   type PlanningConfig,
   type PlanningRole,
-  saveSettings,
   startPlanningPass,
 } from '@/components/shared/task-actions';
 import { useRepo } from '@/components/shared/use-repo';
@@ -64,6 +61,13 @@ function toGrade(value?: string): number | null {
     return Math.max(1, Math.min(5, Math.round(numeric)));
   }
   return GRADE_ALIASES[trimmed.toLowerCase()] ?? null;
+}
+
+/** "The PE agent is" / "The PE and PM agents are" — reflects the pass's agents. */
+function runningAgentsLabel(roles?: PlanningRole[]): string {
+  const active = roles && roles.length > 0 ? roles : (['engineer', 'pm'] as PlanningRole[]);
+  const names = active.map((role) => (role === 'engineer' ? 'PE' : 'PM')).join(' and ');
+  return active.length > 1 ? `The ${names} agents are` : `The ${names} agent is`;
 }
 
 function ProposalCard({
@@ -261,7 +265,6 @@ export function PlanningPage() {
   const [busy, setBusy] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [config, setConfig] = useState<PlanningConfig | null>(null);
-  const [goal, setGoal] = useState('');
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
     null
   );
@@ -280,14 +283,6 @@ export function PlanningPage() {
     getPlanningConfig(repoId).then(setConfig).catch(() => {});
   }, [repoId]);
 
-  // The project goal steers planning, so it's editable right here on the view.
-  const loadGoal = useCallback(() => {
-    if (!repoId) return;
-    getSettings(repoId)
-      .then((s) => setGoal(s.goal))
-      .catch(() => {});
-  }, [repoId]);
-
   // Reset during render when the selected repo changes (React's derived-state
   // pattern), so the effect below only refetches.
   const [loadedRepoId, setLoadedRepoId] = useState(repoId);
@@ -297,13 +292,11 @@ export function PlanningPage() {
     setSelected(new Set());
     setDiscussing(null);
     setConfig(null);
-    setGoal('');
     setLoaded(false);
   }
 
   useEffect(refresh, [refresh]);
   useEffect(loadConfig, [loadConfig]);
-  useEffect(loadGoal, [loadGoal]);
 
   const latest = passes[0];
   const running = latest?.status === 'running';
@@ -430,16 +423,6 @@ export function PlanningPage() {
         </div>
       </div>
 
-      <MarkdownEditorSection
-        title="Goal"
-        description="Steers this planning view and every agent session — vision, current priorities, what “done well” means. Stored in .orchestrator/goal.md."
-        value={goal}
-        minHeightClass="min-h-32 max-h-[28rem]"
-        placeholder="e.g. Nous is a knowledge platform for SMEs. Current priority: …"
-        onChange={setGoal}
-        onSave={() => (repoId ? saveSettings(repoId, { goal }) : Promise.resolve())}
-      />
-
       {missingForScope.length > 0 && (
         <div className="rounded-lg bg-warning-muted px-4 py-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-warning">
@@ -495,7 +478,7 @@ export function PlanningPage() {
             </div>
             {pass.status === 'running' && (
               <p className="text-sm text-muted-foreground">
-                Engineer and PM agents are scanning the repo — this takes a few minutes…
+                {runningAgentsLabel(pass.roles)} scanning the repo — this takes a few minutes…
               </p>
             )}
             {pass.status === 'failed' &&
