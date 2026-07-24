@@ -1,13 +1,17 @@
 /**
- * The task prompt every agent session is launched with — edit THIS file to
- * tailor what agents are told. Nothing else about the session machinery
- * (sessions.ts) needs to change when you tweak the wording here.
+ * CASE: Implementation session — the autonomous agent that works a GitHub issue.
  *
- * Placeholders available: issueNumber, worktreePath, branch, plus the GOAL and
- * MEMORY texts maintained on the /settings page (.orchestrator/goal.md and
- * memory.md). The full rendered prompt is stored on the task (shown in the
- * detail page's "Task prompt" panel) and logged as the highlighted `prompt`
- * log event.
+ * `buildPrompt` is the task prompt every agent session is launched with — edit
+ * it to tailor what agents are told. Nothing about the session machinery
+ * (sessions.ts) needs to change when you tweak the wording here. The two tool
+ * descriptions below are the model-facing text for the `ask_user` and
+ * `save_memory` MCP tools the session exposes.
+ *
+ * Placeholders available to buildPrompt: issueNumber, worktreePath, branch, plus
+ * the GOAL and MEMORY texts maintained on the /settings page (.orchestrator/
+ * goal.md and memory.md). The full rendered prompt is stored on the task (shown
+ * in the detail page's "Task prompt" panel) and logged as the highlighted
+ * `prompt` log event.
  */
 
 export function buildPrompt(
@@ -54,3 +58,13 @@ export function buildPrompt(
   }
   return lines.join('\n');
 }
+
+/** `ask_user` MCP tool — lets the agent pause for one blocking developer decision. */
+export const ASK_USER_TOOL_DESCRIPTION =
+  'Ask the developer a single blocking question when you cannot proceed without their decision. The session pauses until they answer from the dashboard.';
+export const ASK_USER_QUESTION_DESCRIPTION = 'One specific question for the developer';
+
+/** `save_memory` MCP tool — lets the agent persist one reusable codebase lesson. */
+export const SAVE_MEMORY_TOOL_DESCRIPTION =
+  'Save ONE concise, reusable lesson about this codebase to the shared memory that every future agent session reads. Use for gotchas, required steps, and conventions — never issue-specific details.';
+export const SAVE_MEMORY_LESSON_DESCRIPTION = 'One concise sentence with the reusable lesson';

@@ -60,11 +60,19 @@ export interface PlanningProposal {
   /** GitHub labels from: Bug, FE, BE, AI, Infra. */
   labels: string[];
   source: 'engineer' | 'pm' | 'both';
+  /** Effort/impact grades, 1 (low) – 5 (high). Legacy passes may hold S/M/L or high/medium. */
   effort?: string;
   impact?: string;
   status: 'pending' | 'filed' | 'dismissed';
   issueNumber?: number;
   issueUrl?: string;
+}
+
+/** One captured line of a planning pass's live agent activity. */
+export interface PlanningLogLine {
+  role: 'engineer' | 'pm' | 'synthesis';
+  kind: 'text' | 'tool';
+  text: string;
 }
 
 /** One planning-pass run, newest first in .orchestrator/planning.json. */
@@ -74,6 +82,8 @@ export interface PlanningPass {
   status: 'running' | 'complete' | 'failed';
   error?: string;
   proposals: PlanningProposal[];
+  /** Streamed engineer/PM/synthesis activity, kept so the pass log stays viewable when done. */
+  logs?: PlanningLogLine[];
 }
 
 /** One line in .orchestrator/logs/issue-{n}.jsonl and on the /api/tasks/[n]/logs SSE stream. */

@@ -3,9 +3,20 @@ import * as path from 'node:path';
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { PlanningPass, PlanningProposal, RepoInfo } from '@/lib/types';
+import type { PlanningLogLine, PlanningPass, PlanningProposal, RepoInfo } from '@/lib/types';
 import { createIssue } from './github';
+import {
+  CREATE_PROPOSAL_TOOL_DESCRIPTION,
+  type DiscussionMessage,
+  discussionPrompt,
+  exclusionDigest,
+  planningAgentPrompt,
+  synthesisPrompt,
+  UPDATE_PROPOSAL_TOOL_DESCRIPTION,
+} from './prompts';
 import { readSettings } from './settings';
+
+export type { DiscussionMessage } from './prompts';
 
 /**
  * Planning passes: run the principal-engineer and product-manager agents in
@@ -181,20 +192,24 @@ function isUsageLimitError(err: unknown): boolean {
   return /limit|quota|overloaded|exhausted|insufficient|credit/i.test(message);
 }
 
+/** A single captured activity line, role-tagged later by the caller. */
+type LogEvent = { kind: PlanningLogLine['kind']; text: string };
+
 /** Run one query on the primary planning model, retrying once on Opus if limited. */
 async function runPlanningQuery(
   repoPath: string,
   prompt: string,
-  extras?: Parameters<typeof runQuery>[3]
+  extras?: Parameters<typeof runQuery>[3],
+  onEvent?: (event: LogEvent) => void
 ): Promise<string> {
   try {
-    return await runQuery(repoPath, prompt, PLANNING_MODEL, extras);
+    return await runQuery(repoPath, prompt, PLANNING_MODEL, extras, onEvent);
   } catch (err) {
     if (!isUsageLimitError(err)) throw err;
     console.warn(
       `[orchestrator] planning: ${PLANNING_MODEL} limited, falling back to ${PLANNING_FALLBACK_MODEL}`
     );
-    return runQuery(repoPath, prompt, PLANNING_FALLBACK_MODEL, extras);
+    return runQuery(repoPath, prompt, PLANNING_FALLBACK_MODEL, extras, onEvent);
   }
 }
 
@@ -206,7 +221,8 @@ async function runQuery(
   extras?: {
     mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
     allowedTools?: string[];
-  }
+  },
+  onEvent?: (event: LogEvent) => void
 ): Promise<string> {
   const q = query({
     prompt,
@@ -223,6 +239,19 @@ async function runQuery(
   });
   let result = '';
   for await (const message of q) {
+    if (onEvent && message.type === 'assistant') {
+      for (const block of message.message.content) {
+        if (block.type === 'text' && block.text.trim()) {
+          onEvent({ kind: 'text', text: block.text.trim() });
+        } else if (block.type === 'tool_use') {
+          const input =
+            block.input && typeof block.input === 'object'
+              ? JSON.stringify(block.input)
+              : String(block.input ?? '');
+          onEvent({ kind: 'tool', text: `${block.name} ${input}`.trim() });
+        }
+      }
+    }
     if (message.type === 'result') {
       if (message.subtype === 'success' && !message.is_error) {
         result = message.result;
@@ -242,18 +271,12 @@ async function runQuery(
 async function runPlanningAgent(
   repoPath: string,
   defFile: string,
-  exclusions: string
+  exclusions: string,
+  onEvent?: (event: LogEvent) => void
 ): Promise<string> {
   const definition = await fsp.readFile(defFile, 'utf8');
   const body = definition.replace(/^---[\s\S]*?---\s*/, '');
-  const preamble = [
-    'Run a planning pass NOW on the repository you are in.',
-    'Follow the role instructions below exactly. Do not edit anything and do not',
-    'create issues — return your ranked proposals as your final message, in the',
-    'output format the instructions specify.',
-  ].join(' ');
-  const sections = [preamble, exclusions, '---', body].filter(Boolean);
-  return runPlanningQuery(repoPath, sections.join('\n\n'));
+  return runPlanningQuery(repoPath, planningAgentPrompt(body, exclusions), undefined, onEvent);
 }
 
 /**
@@ -286,73 +309,9 @@ async function requirePersonaFiles(
   return { engineer, pm };
 }
 
-/**
- * Digest of every proposal from previous passes, so agents don't waste
- * investigation effort re-discovering work the developer already saw.
- */
-function exclusionDigest(passes: PlanningPass[]): string {
-  const dismissed = new Set<string>();
-  const pending = new Set<string>();
-  const filed = new Set<string>();
-  for (const pass of passes) {
-    for (const p of pass.proposals) {
-      if (p.status === 'dismissed') dismissed.add(p.title);
-      else if (p.status === 'pending') pending.add(p.title);
-      else filed.add(p.issueNumber ? `${p.title} (open issue #${p.issueNumber})` : p.title);
-    }
-  }
-  if (dismissed.size + pending.size + filed.size === 0) return '';
-  const section = (label: string, items: Set<string>) =>
-    items.size ? `${label}\n${[...items].map((t) => `- ${t}`).join('\n')}` : '';
-  return [
-    'PREVIOUSLY PROPOSED — do NOT re-propose any of these:',
-    section(
-      'Dismissed by the developer (rejected — only revisit one if you have materially NEW evidence, and state explicitly what changed):',
-      dismissed
-    ),
-    section('Pending developer review (already proposed, awaiting a decision — skip entirely):', pending),
-    section('Filed as issues (your open-backlog dedupe should catch these too):', filed),
-  ]
-    .filter(Boolean)
-    .join('\n\n');
-}
-
 // ---------------------------------------------------------------------------
-// Synthesis
+// Synthesis (prompt in ./prompts/planning-synthesis)
 // ---------------------------------------------------------------------------
-
-function synthesisPrompt(engineerReport: string, pmReport: string, exclusions: string): string {
-  return [
-    'You are the synthesis step of a planning meeting between a Principal',
-    'Engineer and a Product Manager. Their independent proposal lists are below.',
-    'Merge them into ONE deduped list:',
-    '- When both describe the same underlying work, merge into a single item',
-    '  with source "both", combining the PM problem/outcome framing with the',
-    "  engineer's code anchors.",
-    '- Drop anything that serves no stated goal priority.',
-    '- Keep at most 9 items, ranked by leverage.',
-    ...(exclusions
-      ? [
-          '- BACKSTOP: drop any item matching the previously-proposed list below,',
-          '  unless it explicitly states materially new evidence for a dismissed one.',
-          '',
-          exclusions,
-        ]
-      : []),
-    '',
-    'Respond with STRICT JSON ONLY (no prose, no code fences): an array of',
-    'objects with keys: title (string, <=70 chars), body (markdown string with',
-    '"## Problem", "## Proposed direction", "## Success criteria" sections),',
-    'labels (array from: Bug, FE, BE, AI, Infra), source ("engineer"|"pm"|"both"),',
-    'effort ("S"|"M"|"L" if known), impact ("high"|"medium" if known).',
-    '',
-    '=== PRINCIPAL ENGINEER REPORT ===',
-    engineerReport,
-    '',
-    '=== PRODUCT MANAGER REPORT ===',
-    pmReport,
-  ].join('\n');
-}
 
 interface RawProposal {
   title?: unknown;
@@ -361,6 +320,26 @@ interface RawProposal {
   source?: unknown;
   effort?: unknown;
   impact?: unknown;
+}
+
+/** Legacy S/M/L and high/medium grades, mapped onto the 1-5 scale. */
+const GRADE_ALIASES: Record<string, number> = {
+  xs: 1, s: 2, small: 2, m: 3, med: 3, medium: 3, l: 4, large: 4, xl: 5,
+  low: 2, high: 5, critical: 5,
+};
+
+/** Coerce an effort/impact value (number, "1-5", or legacy word) to a "1"-"5" string. */
+function normalizeGrade(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.max(1, Math.min(5, Math.round(value))));
+  }
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) return String(Math.max(1, Math.min(5, Math.round(numeric))));
+  const alias = GRADE_ALIASES[trimmed.toLowerCase()];
+  return alias ? String(alias) : undefined;
 }
 
 function parseProposals(raw: string): PlanningProposal[] {
@@ -384,8 +363,8 @@ function parseProposals(raw: string): PlanningProposal[] {
         item.source === 'engineer' || item.source === 'pm' || item.source === 'both'
           ? item.source
           : 'both',
-      effort: typeof item.effort === 'string' ? item.effort : undefined,
-      impact: typeof item.impact === 'string' ? item.impact : undefined,
+      effort: normalizeGrade(item.effort),
+      impact: normalizeGrade(item.impact),
       status: 'pending' as const,
     }));
 }
@@ -414,23 +393,58 @@ export async function startPlanningPass(repo: RepoInfo): Promise<string> {
   await saveStore(repo.path, store);
 
   void (async () => {
+    // Collect live agent activity so the pass log stays viewable after it ends.
+    // Flushed on a single timer (never concurrently) to avoid store write races.
+    const logs: PlanningLogLine[] = [];
+    const record =
+      (role: PlanningLogLine['role']) =>
+      (event: LogEvent): void => {
+        logs.push({ role, kind: event.kind, text: event.text.slice(0, 2000) });
+      };
+    // Flushes are chained (never overlapping writes) and stop once `done` is set,
+    // so a lagging flush can't clobber the authoritative final status write below.
+    let done = false;
+    let flushing: Promise<void> = Promise.resolve();
+    const flush = setInterval(() => {
+      if (done) return;
+      flushing = flushing.then(() =>
+        updatePass(repo.path, pass.id, (p) => {
+          p.logs = logs.slice();
+        }).catch(() => {})
+      );
+    }, 4000);
+    const stopFlushing = async () => {
+      done = true;
+      clearInterval(flush);
+      await flushing;
+    };
+
     try {
       const [engineerReport, pmReport] = await Promise.all([
-        runPlanningAgent(repo.path, personas.engineer, exclusions),
-        runPlanningAgent(repo.path, personas.pm, exclusions),
+        runPlanningAgent(repo.path, personas.engineer, exclusions, record('engineer')),
+        runPlanningAgent(repo.path, personas.pm, exclusions, record('pm')),
       ]);
       const proposals = parseProposals(
-        await runPlanningQuery(repo.path, synthesisPrompt(engineerReport, pmReport, exclusions))
+        await runPlanningQuery(
+          repo.path,
+          synthesisPrompt(engineerReport, pmReport, exclusions),
+          undefined,
+          record('synthesis')
+        )
       );
+      await stopFlushing();
       await updatePass(repo.path, pass.id, (p) => {
         p.status = 'complete';
         p.proposals = proposals;
+        p.logs = logs.slice();
       });
     } catch (err) {
+      await stopFlushing();
       const message = err instanceof Error ? err.message : String(err);
       await updatePass(repo.path, pass.id, (p) => {
         p.status = 'failed';
         p.error = message;
+        p.logs = logs.slice();
       }).catch(() => {});
     } finally {
       g.running = false;
@@ -478,13 +492,9 @@ export async function dismissProposals(
 }
 
 // ---------------------------------------------------------------------------
-// Proposal discussion (the "Discuss" drawer on the planning page)
+// Proposal discussion (the "Discuss" drawer on the planning page).
+// Prompt + DiscussionMessage type live in ./prompts/proposal-discussion.
 // ---------------------------------------------------------------------------
-
-export interface DiscussionMessage {
-  role: 'user' | 'assistant';
-  text: string;
-}
 
 /** Patch a proposal's content in place (discussion tool). */
 async function updateProposalContent(
@@ -535,41 +545,6 @@ async function addProposalToPass(
   return created;
 }
 
-function discussionPrompt(
-  proposal: PlanningProposal,
-  goal: string,
-  messages: DiscussionMessage[]
-): string {
-  const transcript = messages
-    .map((m) => `${m.role === 'user' ? 'DEVELOPER' : 'YOU'}: ${m.text}`)
-    .join('\n\n');
-  return [
-    'You are discussing ONE task proposal with the developer before it may be',
-    'filed as a GitHub issue. Your working directory is the repository the',
-    'proposal is about — read code (read-only) to verify claims when the',
-    'discussion needs evidence. Be direct and concise; agree or push back on',
-    'the merits, not to please.',
-    '',
-    'Tools:',
-    '- `update_proposal` — apply changes the two of you agree on (partial:',
-    '  title/body/labels). Keep bodies in "## Problem / ## Proposed direction /',
-    '  ## Success criteria" form; labels only from: Bug, FE, BE, AI, Infra.',
-    '- `create_proposal` — when you agree to split scope, create the new',
-    '  proposal in the same pass (same body format).',
-    'After a tool call, confirm in one sentence what changed. Never create',
-    'GitHub issues — the developer files proposals from the UI.',
-    '',
-    '## Project goal',
-    goal.trim() || '(no goal file)',
-    '',
-    '## Current proposal',
-    JSON.stringify(proposal, null, 2),
-    '',
-    ...(transcript ? ['## Conversation so far', transcript, ''] : []),
-    'Reply to the last developer message.',
-  ].join('\n');
-}
-
 /**
  * One discussion turn: stateless per call — the client sends the transcript,
  * the reply comes back, and any tool-applied proposal edits are persisted.
@@ -592,7 +567,7 @@ export async function discussProposal(
     tools: [
       tool(
         'update_proposal',
-        'Apply agreed changes to the proposal under discussion. Provide only the fields to change.',
+        UPDATE_PROPOSAL_TOOL_DESCRIPTION,
         {
           title: z.string().optional(),
           body: z.string().optional(),
@@ -607,7 +582,7 @@ export async function discussProposal(
       ),
       tool(
         'create_proposal',
-        'Create an additional proposal in the same planning pass (e.g. when splitting scope).',
+        CREATE_PROPOSAL_TOOL_DESCRIPTION,
         {
           title: z.string(),
           body: z.string(),

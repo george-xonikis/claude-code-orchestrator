@@ -12,8 +12,14 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { LogEvent, RepoInfo, Task } from '@/lib/types';
+import {
+  ASK_USER_QUESTION_DESCRIPTION,
+  ASK_USER_TOOL_DESCRIPTION,
+  buildPrompt,
+  SAVE_MEMORY_LESSON_DESCRIPTION,
+  SAVE_MEMORY_TOOL_DESCRIPTION,
+} from './prompts';
 import { appendMemory, readSettings } from './settings';
-import { buildPrompt } from './task-prompt';
 
 /**
  * Agent session runtime, backed by the TypeScript Claude Agent SDK
@@ -522,11 +528,9 @@ export async function startSession(
     tools: [
       tool(
         'ask_user',
-        'Ask the developer a single blocking question when you cannot proceed without their decision. The session pauses until they answer from the dashboard.',
+        ASK_USER_TOOL_DESCRIPTION,
         {
-          question: z
-            .string()
-            .describe('One specific question for the developer'),
+          question: z.string().describe(ASK_USER_QUESTION_DESCRIPTION),
         },
         async ({ question }) => {
           const live = sessions.get(key);
@@ -560,9 +564,9 @@ export async function startSession(
       ),
       tool(
         'save_memory',
-        'Save ONE concise, reusable lesson about this codebase to the shared memory that every future agent session reads. Use for gotchas, required steps, and conventions — never issue-specific details.',
+        SAVE_MEMORY_TOOL_DESCRIPTION,
         {
-          lesson: z.string().describe('One concise sentence with the reusable lesson'),
+          lesson: z.string().describe(SAVE_MEMORY_LESSON_DESCRIPTION),
         },
         async ({ lesson }) => {
           await appendMemory(repo.path, issueNumber, lesson);

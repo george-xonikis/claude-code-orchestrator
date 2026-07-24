@@ -1,9 +1,22 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, ChevronRight, Copy, MessageSquare, Sparkles, X } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  DollarSign,
+  Hammer,
+  Sparkles,
+  X,
+} from 'lucide-react';
 
-import type { PlanningPass, PlanningProposal } from '@/lib/types';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
+import type { PlanningLogLine, PlanningPass, PlanningProposal } from '@/lib/types';
+import { ClaudeLogo } from '@/components/shared/claude-logo';
 import { LabelChip } from '@/components/shared/label-chip';
 import {
   discussProposal,
@@ -29,10 +42,55 @@ const INTERVAL_OPTIONS = [
 ] as const;
 
 const SOURCE_BADGE: Record<PlanningProposal['source'], { label: string; className: string }> = {
-  engineer: { label: 'ENG', className: 'bg-info-muted text-info' },
+  engineer: { label: 'PE', className: 'bg-info-muted text-info' },
   pm: { label: 'PM', className: 'bg-warning-muted text-warning' },
-  both: { label: 'ENG + PM', className: 'bg-success-muted text-success' },
+  both: { label: 'PE + PM', className: 'bg-success-muted text-success' },
 };
+
+/** Legacy S/M/L and high/medium grades, mapped onto the 1-5 scale for display. */
+const GRADE_ALIASES: Record<string, number> = {
+  xs: 1, s: 2, small: 2, m: 3, med: 3, medium: 3, l: 4, large: 4, xl: 5,
+  low: 2, high: 5, critical: 5,
+};
+
+/** Coerce an effort/impact value ("1"-"5" or a legacy word) to a 1-5 grade. */
+function toGrade(value?: string): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric) && trimmed !== '') {
+    return Math.max(1, Math.min(5, Math.round(numeric)));
+  }
+  return GRADE_ALIASES[trimmed.toLowerCase()] ?? null;
+}
+
+/** A 1-5 rating rendered as five icons, `grade` of them filled. */
+function GradeMeter({
+  icon: Icon,
+  grade,
+  label,
+  filledClassName,
+}: {
+  icon: typeof DollarSign;
+  grade: number;
+  label: string;
+  filledClassName: string;
+}) {
+  return (
+    <span
+      title={`${label} ${grade}/5`}
+      aria-label={`${label} ${grade} out of 5`}
+      className="inline-flex items-center gap-0.5 rounded-full bg-secondary px-2 py-1"
+    >
+      {Array.from({ length: 5 }).map((_, i) => (
+        <Icon
+          key={i}
+          className={`h-3 w-3 ${i < grade ? filledClassName : 'text-muted-foreground/25'}`}
+        />
+      ))}
+    </span>
+  );
+}
 
 function ProposalCard({
   proposal,
@@ -92,15 +150,21 @@ function ProposalCard({
             {proposal.labels.map((label) => (
               <LabelChip key={label} label={label} />
             ))}
-            {proposal.effort && (
-              <span className="inline-flex items-center rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
-                effort {proposal.effort}
-              </span>
+            {toGrade(proposal.effort) !== null && (
+              <GradeMeter
+                icon={Hammer}
+                grade={toGrade(proposal.effort) as number}
+                label="Effort"
+                filledClassName="text-warning"
+              />
             )}
-            {proposal.impact && (
-              <span className="inline-flex items-center rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
-                impact {proposal.impact}
-              </span>
+            {toGrade(proposal.impact) !== null && (
+              <GradeMeter
+                icon={DollarSign}
+                grade={toGrade(proposal.impact) as number}
+                label="Impact"
+                filledClassName="text-success"
+              />
             )}
             {proposal.status === 'filed' && proposal.issueUrl && (
               <a
@@ -116,7 +180,7 @@ function ProposalCard({
               <span className="text-[11px] text-muted-foreground">dismissed</span>
             )}
           </div>
-          <div className="mt-1.5 flex items-center gap-3">
+          <div className="mt-2 flex items-center justify-between gap-3">
             <button
               type="button"
               onClick={() => setExpanded((v) => !v)}
@@ -127,28 +191,99 @@ function ProposalCard({
             </button>
             <button
               type="button"
-              onClick={handleCopy}
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-            >
-              {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
-              {copied ? 'Copied' : 'Copy proposal'}
-            </button>
-            <button
-              type="button"
               onClick={onDiscuss}
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#D97757]/40 bg-[#D97757]/10 px-4 text-sm font-semibold text-foreground transition-colors hover:bg-[#D97757]/20"
             >
-              <MessageSquare className="h-3 w-3" />
-              Discuss
+              <ClaudeLogo className="h-4 w-4 text-[#D97757]" />
+              Claude
             </button>
           </div>
           {expanded && (
-            <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-main-surface-primary p-3 font-mono text-[11px] leading-5 text-muted-foreground">
-              {proposal.body}
-            </pre>
+            <div className="mt-2">
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-main-surface-primary p-3 font-mono text-[11px] leading-5 text-muted-foreground">
+                {proposal.body}
+              </pre>
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-background-hover hover:text-foreground"
+                >
+                  {copied ? (
+                    <Check className="h-3 w-3 text-success" />
+                  ) : (
+                    <Copy className="h-3 w-3" />
+                  )}
+                  {copied ? 'Copied' : 'Copy proposal'}
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+const LOG_ROLE_META: Record<PlanningLogLine['role'], { label: string; className: string }> = {
+  engineer: { label: 'PE', className: 'text-info' },
+  pm: { label: 'PM', className: 'text-warning' },
+  synthesis: { label: 'SYN', className: 'text-success' },
+};
+
+/** Collapsible accordion of a pass's captured agent activity; stays viewable when done. */
+function PassLog({ logs, running }: { logs: PlanningLogLine[]; running: boolean }) {
+  const [open, setOpen] = useState(running);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (open && running) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    }
+  }, [logs, open, running]);
+
+  if (logs.length === 0) return null;
+
+  return (
+    <div className="mb-2 rounded-md border border-border bg-elevated-secondary">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-xs font-semibold text-muted-foreground hover:text-foreground"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        Plan activity log
+        <span className="font-normal text-muted-foreground/70">· {logs.length} events</span>
+        {running && (
+          <span className="ml-1 inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-info" />
+        )}
+      </button>
+      {open && (
+        <div
+          ref={scrollRef}
+          className="max-h-80 space-y-1 overflow-auto border-t border-border p-3"
+        >
+          {logs.map((line, index) => {
+            const meta = LOG_ROLE_META[line.role];
+            return (
+              <div key={index} className="flex gap-2 text-[11px] leading-5">
+                <span className={`w-8 shrink-0 font-mono font-semibold ${meta.className}`}>
+                  {meta.label}
+                </span>
+                <span
+                  className={`min-w-0 flex-1 whitespace-pre-wrap break-words ${
+                    line.kind === 'tool'
+                      ? 'font-mono text-muted-foreground'
+                      : 'text-foreground'
+                  }`}
+                >
+                  {line.kind === 'tool' ? `⚙ ${line.text}` : line.text}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -349,8 +484,9 @@ export function PlanningPage() {
               </p>
             )}
             {pass.status === 'failed' && (
-              <p className="text-sm text-destructive">Pass failed: {pass.error}</p>
+              <p className="mb-2 text-sm text-destructive">Pass failed: {pass.error}</p>
             )}
+            <PassLog logs={pass.logs ?? []} running={pass.status === 'running'} />
             <div className="flex flex-col gap-2">
               {pass.proposals.map((proposal) => (
                 <ProposalCard
@@ -460,18 +596,23 @@ function DiscussDrawer({
             proposal).
           </p>
         )}
-        {messages.map((message, index) => (
-          <div
-            key={index}
-            className={`max-w-[90%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm ${
-              message.role === 'user'
-                ? 'ml-auto bg-primary/10'
-                : 'bg-elevated-secondary'
-            }`}
-          >
-            {message.text}
-          </div>
-        ))}
+        {messages.map((message, index) =>
+          message.role === 'user' ? (
+            <div
+              key={index}
+              className="ml-auto max-w-[90%] whitespace-pre-wrap rounded-lg bg-primary/10 px-3 py-2 text-sm"
+            >
+              {message.text}
+            </div>
+          ) : (
+            <div
+              key={index}
+              className="markdown-preview max-w-[90%] rounded-lg bg-elevated-secondary px-3 py-2 text-sm"
+            >
+              <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+            </div>
+          )
+        )}
         {thinking && <p className="text-xs text-muted-foreground">Thinking…</p>}
       </div>
       <div className="border-t border-border p-3">
