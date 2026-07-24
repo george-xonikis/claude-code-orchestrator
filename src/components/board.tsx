@@ -1,12 +1,21 @@
 'use client';
 
-import { useState } from 'react';
-import { RefreshCw, Search } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { CirclePause, CirclePlay, CircleStop, ListOrdered, RefreshCw, Search } from 'lucide-react';
 
 import type { Task, TaskStatus } from '@/lib/types';
 import { LABEL_COLORS } from '@/components/shared/label-chip';
-import { countActiveSessions, pollNow, stopAllTasks } from '@/components/shared/task-actions';
+import {
+  countActiveSessions,
+  getPlanningConfig,
+  isNonAgentTask,
+  type PlanningConfig,
+  pollNow,
+  setPlanningConfig,
+  stopAllTasks,
+} from '@/components/shared/task-actions';
 import { AddRepoModal } from '@/components/add-repo-modal';
+import { QueueModal } from '@/components/queue-modal';
 import { useRepo } from '@/components/shared/use-repo';
 import { useTasks } from '@/components/shared/use-tasks';
 import { TaskCard } from '@/components/task-card';
@@ -45,9 +54,48 @@ export function Board() {
   const [query, setQuery] = useState('');
   const [polling, setPolling] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [config, setConfig] = useState<PlanningConfig | null>(null);
+  const [queueOpen, setQueueOpen] = useState(false);
   // Empty selection = show everything.
   const [activeLabels, setActiveLabels] = useState<ReadonlySet<string>>(new Set());
   const activeSessions = countActiveSessions(tasks);
+
+  // The auto-pickup queue: ready, agent-eligible tickets in execution order.
+  const queueOrder = config?.queueOrder ?? 'oldest';
+  const queue = tasks
+    .filter((task) => task.status === 'ready' && !isNonAgentTask(task))
+    .sort((a, b) =>
+      queueOrder === 'newest' ? b.issueNumber - a.issueNumber : a.issueNumber - b.issueNumber
+    );
+
+  // Auto-pickup lives on this board; fetch the repo's config to reflect it.
+  // Reset during render on repo change (derived-state pattern) so the effect only fetches.
+  const [configRepoId, setConfigRepoId] = useState<string | null>(current?.id ?? null);
+  if (configRepoId !== (current?.id ?? null)) {
+    setConfigRepoId(current?.id ?? null);
+    setConfig(null);
+  }
+  useEffect(() => {
+    if (!current) return;
+    const repoId = current.id;
+    const load = () => getPlanningConfig(repoId).then(setConfig).catch(() => {});
+    load();
+    // Poll so the toggle reflects auto-pickup turning itself off at the per-run cap.
+    const id = setInterval(load, 10_000);
+    return () => clearInterval(id);
+  }, [current]);
+
+  const toggleAutoPickup = (on: boolean) => {
+    if (!current) return;
+    const repoId = current.id;
+    setConfig((prev) => (prev ? { ...prev, autoStart: on } : prev)); // optimistic
+    setPlanningConfig(repoId, { autoStart: on })
+      .then((saved) => {
+        setConfig(saved);
+        if (on) return pollNow(repoId); // kick a cycle so pickup starts now
+      })
+      .catch(() => {});
+  };
 
   const handlePollNow = () => {
     if (!current) return;
@@ -59,8 +107,12 @@ export function Board() {
 
   const handleStopAll = () => {
     if (!current) return;
+    const repoId = current.id;
     setStopping(true);
-    stopAllTasks(current.id, tasks)
+    // Also turn auto-pickup off, otherwise the loop would re-claim what we stop.
+    setConfig((prev) => (prev ? { ...prev, autoStart: false } : prev));
+    setPlanningConfig(repoId, { autoStart: false }).then(setConfig).catch(() => {});
+    stopAllTasks(repoId, tasks)
       .catch(() => {})
       .finally(() => setStopping(false));
   };
@@ -157,10 +209,11 @@ export function Board() {
             type="button"
             disabled={polling}
             onClick={handlePollNow}
+            title="Sync GitHub issues to the board now"
             className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-xs font-medium hover:bg-background-hover disabled:opacity-50"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${polling ? 'animate-spin' : ''}`} />
-            Poll now
+            Pull issues
           </button>
           <button
             type="button"
@@ -168,8 +221,43 @@ export function Board() {
             onClick={handleStopAll}
             className="inline-flex h-8 items-center gap-1.5 rounded-md bg-destructive-solid px-3 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
           >
-            ■ Stop all
+            <CircleStop className="h-3.5 w-3.5" />
+            Stop all
           </button>
+          {current?.htmlUrl && (
+            <button
+              type="button"
+              onClick={() => setQueueOpen(true)}
+              title="See the tickets auto-pickup will run, in order"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-xs font-medium hover:bg-background-hover"
+            >
+              <ListOrdered className="h-3.5 w-3.5" />
+              Queue{queue.length > 0 ? ` (${queue.length})` : ''}
+            </button>
+          )}
+          {current?.htmlUrl &&
+            (config?.autoStart ? (
+              <button
+                type="button"
+                onClick={() => toggleAutoPickup(false)}
+                title="Pause auto-pickup: no new tickets are started. In-progress agents keep running (use Stop all to abort them)."
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-xs font-medium hover:bg-background-hover"
+              >
+                <CirclePause className="h-3.5 w-3.5" />
+                Pause pickup
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={!config}
+                onClick={() => toggleAutoPickup(true)}
+                title="Start agents on ready tickets, up to the concurrency cap (oldest first). Configure in Settings → Execution."
+                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              >
+                <CirclePlay className="h-3.5 w-3.5" />
+                Start agents
+              </button>
+            ))}
         </div>
       </div>
       <div className="grid grid-cols-6 gap-3">
@@ -192,6 +280,15 @@ export function Board() {
           );
         })}
       </div>
+      {queueOpen && (
+        <QueueModal
+          queue={queue}
+          queueOrder={queueOrder}
+          tasksPerRun={config?.tasksPerRun ?? null}
+          maxActive={config?.maxActive ?? 1}
+          onClose={() => setQueueOpen(false)}
+        />
+      )}
     </div>
   );
 }

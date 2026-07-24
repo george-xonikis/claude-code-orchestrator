@@ -120,6 +120,12 @@ export interface PlanningConfig {
   autoFile: boolean;
   /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
   autoStart: boolean;
+  /** Order the pickup queue drains: oldest issue first, or newest first. */
+  queueOrder: 'oldest' | 'newest';
+  /** How often the loop polls GitHub for this repo's issues, in minutes; null = off. */
+  pollMinutes: number | null;
+  /** Max tasks auto-pickup executes per run before stopping; null = unlimited. */
+  tasksPerRun: number | null;
   /** Max concurrent agent sessions the loop may auto-start. */
   maxActive: number;
   /** Max top-ranked proposals a scheduled pass auto-files per run. */

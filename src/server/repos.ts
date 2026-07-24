@@ -162,12 +162,12 @@ export async function loadRepos(): Promise<RepoInfo[]> {
   return Promise.all(entries.map(toRepoInfo));
 }
 
-/** Look up one registered repo by id. Throws on unknown id. */
+/** Look up one registered repo by id, with computed fields. Throws on unknown id. */
 export async function getRepo(id: string): Promise<RepoInfo> {
   const entries = await readRegistry();
   const entry = entries.find((candidate) => candidate.id === id);
   if (!entry) throw new Error(`Unknown repo id: ${id}`);
-  return entry;
+  return toRepoInfo(entry);
 }
 
 /**

@@ -92,6 +92,12 @@ export interface PlanningConfig {
   autoFile: boolean;
   /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
   autoStart: boolean;
+  /** Order the pickup queue drains: oldest issue first, or newest first. */
+  queueOrder: 'oldest' | 'newest';
+  /** How often the loop polls GitHub for this repo's issues, in minutes; null = off. */
+  pollMinutes: number | null;
+  /** Max tasks auto-pickup executes per run before stopping; null = unlimited. */
+  tasksPerRun: number | null;
   /** Max concurrent agent sessions the loop may auto-start. */
   maxActive: number;
   /** Max top-ranked proposals a scheduled pass may auto-file per run. */
@@ -116,6 +122,9 @@ const CONFIG_DEFAULTS: PlanningConfig = {
   roles: ['engineer', 'pm'],
   autoFile: false,
   autoStart: false,
+  queueOrder: 'oldest',
+  pollMinutes: 2,
+  tasksPerRun: null,
   maxActive: 2,
   maxAutoFile: 3,
   maxProposals: 9,
@@ -169,6 +178,10 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       roles: sanitizeRoles(parsed.roles),
       autoFile: parsed.autoFile ?? legacyAutonomous,
       autoStart: parsed.autoStart ?? legacyAutonomous,
+      queueOrder: parsed.queueOrder === 'newest' ? 'newest' : 'oldest',
+      pollMinutes:
+        parsed.pollMinutes === undefined ? 2 : parsed.pollMinutes === null ? null : clampInt(parsed.pollMinutes, 1, 60, 2),
+      tasksPerRun: parsed.tasksPerRun == null ? null : clampInt(parsed.tasksPerRun, 1, 100, 4),
       maxActive: clampInt(parsed.maxActive, 1, 10, CONFIG_DEFAULTS.maxActive),
       maxAutoFile: clampInt(parsed.maxAutoFile, 0, 9, CONFIG_DEFAULTS.maxAutoFile),
       maxProposals: clampInt(parsed.maxProposals, 1, 20, CONFIG_DEFAULTS.maxProposals),
@@ -254,6 +267,13 @@ export async function setPlanningConfig(
   if (patch.roles !== undefined) store.roles = sanitizeRoles(patch.roles);
   if (patch.autoFile !== undefined) store.autoFile = patch.autoFile;
   if (patch.autoStart !== undefined) store.autoStart = patch.autoStart;
+  if (patch.queueOrder !== undefined)
+    store.queueOrder = patch.queueOrder === 'newest' ? 'newest' : 'oldest';
+  if (patch.pollMinutes !== undefined)
+    store.pollMinutes =
+      patch.pollMinutes === null ? null : clampInt(patch.pollMinutes, 1, 60, store.pollMinutes ?? 2);
+  if (patch.tasksPerRun !== undefined)
+    store.tasksPerRun = patch.tasksPerRun === null ? null : clampInt(patch.tasksPerRun, 1, 100, 4);
   if (patch.maxActive !== undefined) store.maxActive = clampInt(patch.maxActive, 1, 10, store.maxActive);
   if (patch.maxAutoFile !== undefined)
     store.maxAutoFile = clampInt(patch.maxAutoFile, 0, 9, store.maxAutoFile);

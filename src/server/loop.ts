@@ -1,6 +1,6 @@
 import type { RepoInfo, Task } from '@/lib/types';
 import * as github from './github';
-import { getPlanningConfig } from './planning';
+import { getPlanningConfig, setPlanningConfig } from './planning';
 import { loadRepos } from './repos';
 import * as sessions from './sessions';
 import * as state from './state';
@@ -21,13 +21,11 @@ import * as worktrees from './worktrees';
  * Next dev hot-reload doesn't duplicate the loop.
  */
 
-const POLL_INTERVAL_MS = 2 * 60_000;
+/** How often the loop wakes to check each repo; per-repo polling is gated by config. */
+const BASE_TICK_MS = 30_000;
 
 /** Issues carrying this label must never be implemented by an agent. */
 const NON_AGENT_LABEL = /^non[- ]?agent$/i;
-
-/** In autonomous mode, only issues carrying one of these labels are auto-started. */
-const AGENT_READY_LABEL = /^(proposed|agent-ready)$/i;
 
 interface RepoLoopState {
   polling: boolean;
@@ -35,6 +33,12 @@ interface RepoLoopState {
   recovered: boolean;
   /** Issues with a live session (working OR needs_input) — the slot count. */
   active: Set<number>;
+  /** Epoch ms of the last GitHub poll (0 = never), for the per-repo poll interval. */
+  lastPolledAt: number;
+  /** Tasks auto-pickup has started in the current run (reset when it's re-enabled). */
+  executedThisRun: number;
+  /** Previous auto-pickup on/off, to detect a fresh run for the counter reset. */
+  autoStartWas: boolean;
 }
 
 interface LoopGlobal {
@@ -62,7 +66,14 @@ function repoLoop(repoId: string): RepoLoopState {
   const g = loop();
   let s = g.repos.get(repoId);
   if (!s) {
-    s = { polling: false, recovered: false, active: new Set() };
+    s = {
+      polling: false,
+      recovered: false,
+      active: new Set(),
+      lastPolledAt: 0,
+      executedThisRun: 0,
+      autoStartWas: false,
+    };
     g.repos.set(repoId, s);
   }
   return s;
@@ -287,32 +298,51 @@ async function poll(repo: RepoInfo): Promise<void> {
         logError(`reconcile ${repo.name}#${task.issueNumber}`, err);
       }
     }
-
-    // 3. Autonomous mode (opt-in): auto-start ready issues up to the cap.
-    await autoStart(repo, s);
+    // NOTE: auto-pickup runs separately (every tick), independent of GitHub polling.
   } finally {
     s.polling = false;
   }
 }
 
 /**
- * Autonomous auto-start: while under the per-repo concurrency cap, claim ready
- * issues labeled `proposed`/`agent-ready` (skipping `non-agent`). No-op unless
- * the repo has autonomous mode on and a GitHub URL. `claim()` reserves the slot
- * synchronously via `s.active.add`, so the cap is enforced across iterations.
- * The merge gate stays human — this only takes work as far as a commit.
+ * Auto-pickup: while under the per-repo concurrency cap, claim ready issues
+ * (skipping `non-agent`), draining them in the configured queue order (oldest
+ * issue first by default). No-op unless the repo has auto-pickup on and a GitHub
+ * URL. `claim()` reserves the slot synchronously via `s.active.add`, so the cap
+ * holds across iterations. Turning auto-pickup off just stops new pickups —
+ * in-flight sessions keep running (never cancelled), and the merge gate stays
+ * human: this only takes work as far as a commit.
  */
 async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
   if (!repo.htmlUrl) return;
-  const { autoStart: enabled, maxActive } = await getPlanningConfig(repo);
-  if (!enabled || s.active.size >= maxActive) return;
+  const { autoStart: enabled, maxActive, queueOrder, tasksPerRun } = await getPlanningConfig(repo);
 
-  for (const task of await state.getTasks(repo.path)) {
-    if (s.active.size >= maxActive) break;
-    if (task.status !== 'ready' || s.active.has(task.issueNumber)) continue;
-    const labels = task.labels ?? [];
-    if (labels.some((label) => NON_AGENT_LABEL.test(label))) continue;
-    if (!labels.some((label) => AGENT_READY_LABEL.test(label))) continue;
+  // A fresh run (off -> on) resets the per-run task counter.
+  if (enabled && !s.autoStartWas) s.executedThisRun = 0;
+  s.autoStartWas = enabled;
+  if (!enabled) return;
+
+  // Hit the per-run cap → turn auto-pickup off (in-flight sessions keep running).
+  const capReached = () => tasksPerRun !== null && s.executedThisRun >= tasksPerRun;
+  if (capReached()) {
+    await setPlanningConfig(repo, { autoStart: false }).catch(() => {});
+    s.autoStartWas = false;
+    return;
+  }
+  if (s.active.size >= maxActive) return;
+
+  const queue = (await state.getTasks(repo.path))
+    .filter((task) => {
+      if (task.status !== 'ready' || s.active.has(task.issueNumber)) return false;
+      return !(task.labels ?? []).some((label) => NON_AGENT_LABEL.test(label));
+    })
+    // Issue numbers are monotonic, so ascending = oldest first.
+    .sort((a, b) =>
+      queueOrder === 'newest' ? b.issueNumber - a.issueNumber : a.issueNumber - b.issueNumber
+    );
+
+  for (const task of queue) {
+    if (s.active.size >= maxActive || capReached()) break;
     try {
       await claim(
         repo,
@@ -321,10 +351,17 @@ async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
         task.preferredModel,
         task.useWorkflow ?? false
       );
+      s.executedThisRun += 1;
     } catch (err) {
-      // claim() already records the failure on the task; keep polling others.
-      logError(`auto-start ${repo.name}#${task.issueNumber}`, err);
+      // claim() already records the failure on the task; keep draining the queue.
+      logError(`auto-pickup ${repo.name}#${task.issueNumber}`, err);
     }
+  }
+
+  // If that filled the run's budget, stop auto-pickup so it doesn't keep going.
+  if (capReached()) {
+    await setPlanningConfig(repo, { autoStart: false }).catch(() => {});
+    s.autoStartWas = false;
   }
 }
 
@@ -370,14 +407,23 @@ async function recoverStaleTasks(repo: RepoInfo): Promise<void> {
   }
 }
 
-/** One tick: recover (once per repo) + poll every registered repo. */
+/** One tick: recover (once per repo) + poll each repo whose interval has elapsed. */
 async function pollAllRepos(): Promise<void> {
   const repos = await loadRepos();
+  const now = Date.now();
   await Promise.all(
     repos.map(async (repo) => {
       try {
         await recoverStaleTasks(repo);
-        await poll(repo);
+        const s = repoLoop(repo.id);
+        const { pollMinutes } = await getPlanningConfig(repo);
+        // Poll GitHub only when due (skip entirely when off)...
+        if (pollMinutes !== null && now - s.lastPolledAt >= pollMinutes * 60_000) {
+          s.lastPolledAt = now;
+          await poll(repo);
+        }
+        // ...but keep auto-pickup draining the queue every tick, regardless.
+        await autoStart(repo, s);
       } catch (err) {
         logError(`poll cycle for ${repo.name}`, err);
       }
@@ -397,7 +443,7 @@ export function ensureLoopStarted(): void {
   sessions.onSessionEvent(handleSessionEvent);
   g.interval = setInterval(() => {
     pollAllRepos().catch((err) => logError('poll cycle', err));
-  }, POLL_INTERVAL_MS);
+  }, BASE_TICK_MS);
   void pollAllRepos().catch((err) => logError('initial poll', err));
 }
 
@@ -405,7 +451,10 @@ export function ensureLoopStarted(): void {
 export async function pollNow(repo: RepoInfo): Promise<void> {
   ensureLoopStarted();
   await recoverStaleTasks(repo);
+  const s = repoLoop(repo.id);
+  s.lastPolledAt = Date.now(); // resets the per-repo interval clock
   await poll(repo);
+  await autoStart(repo, s); // pick up straight away (also backs "Start agents")
 }
 
 
@@ -474,6 +523,19 @@ export async function pushIssue(
   }
   if (!task.branch) {
     throw new Error(`Issue #${issueNumber} has no branch recorded`);
+  }
+  // The agent can finish cleanly without committing (e.g. it decided no change
+  // was needed). Pushing that opens a PR with no diff — GitHub rejects it with a
+  // cryptic "No commits between…". Catch it here with a clear, actionable state.
+  if ((await worktrees.commitsAhead(repo.path, issueNumber)) === 0) {
+    const message = 'The agent finished without committing any changes — nothing to push.';
+    const merged = await state.upsertTask(repo.path, {
+      issueNumber,
+      status: 'failed',
+      error: message,
+    });
+    await onStatusChange(repo, issueNumber, merged).catch(() => {});
+    throw new Error(message);
   }
   await worktrees.pushBranch(repo.path, issueNumber);
   const pr = await github.createPullRequest(

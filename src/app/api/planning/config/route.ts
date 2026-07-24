@@ -62,10 +62,24 @@ export async function POST(request: Request) {
       if (!isBool(body.autoStart)) return badRequest('autoStart must be a boolean');
       patch.autoStart = body.autoStart;
     }
+    if ('queueOrder' in body) {
+      if (body.queueOrder !== 'oldest' && body.queueOrder !== 'newest') {
+        return badRequest('queueOrder must be "oldest" or "newest"');
+      }
+      patch.queueOrder = body.queueOrder;
+    }
     for (const key of ['maxActive', 'maxAutoFile', 'maxProposals', 'minImpact', 'maxEffort'] as const) {
       if (key in body) {
         if (!isNum(body[key])) return badRequest(`${key} must be a number`);
         patch[key] = body[key] as number;
+      }
+    }
+    for (const key of ['pollMinutes', 'tasksPerRun'] as const) {
+      if (key in body) {
+        if (body[key] !== null && !isNum(body[key])) {
+          return badRequest(`${key} must be a number or null`);
+        }
+        patch[key] = body[key] as number | null;
       }
     }
     if ('topics' in body) {

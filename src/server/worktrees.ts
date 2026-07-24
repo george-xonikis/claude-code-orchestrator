@@ -89,6 +89,24 @@ async function resolveDefaultBranch(repoPath: string): Promise<string> {
   return branch;
 }
 
+/**
+ * How many commits the issue's agent branch has that the default branch doesn't.
+ * 0 means the agent finished without committing anything (so there's nothing to
+ * push / open a PR for). Returns 0 if the branch is missing.
+ */
+export async function commitsAhead(repoPath: string, issueNumber: number): Promise<number> {
+  assertValidIssueNumber(issueNumber);
+  const branch = branchName(issueNumber);
+  if (!(await branchExists(repoPath, branch))) return 0;
+  const base = await getDefaultBranch(repoPath);
+  try {
+    const out = await git(repoPath, ['rev-list', '--count', `${base}..${branch}`]);
+    return Number(out.trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function branchExists(repoPath: string, branch: string): Promise<boolean> {
   try {
     await git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
