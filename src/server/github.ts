@@ -183,34 +183,70 @@ export async function editIssue(
   await gh(repoPath, args);
 }
 
-/** Create a GitHub issue (planning-pass approvals). Ensures the `proposed` label exists. */
-const proposedLabelEnsured = new Map<string, Promise<void>>();
+/** Colors for the planning label taxonomy; anything else gets a neutral gray. */
+const LABEL_COLORS: Record<string, string> = {
+  proposed: 'BFD4F2',
+  bug: 'D73A4A',
+  fe: '1D76DB',
+  be: '0E8A16',
+  ai: '8E44AD',
+  infra: 'FBCA04',
+};
+
+/** Per-repo map of existing labels, keyed by lowercase name -> actual name. */
+const knownLabels = new Map<string, Map<string, string>>();
+
+async function labelIndex(repoPath: string): Promise<Map<string, string>> {
+  let index = knownLabels.get(repoPath);
+  if (index) return index;
+  index = new Map();
+  try {
+    const raw = await gh(repoPath, ['label', 'list', '--limit', '200', '--json', 'name']);
+    for (const { name } of JSON.parse(raw) as { name: string }[]) {
+      index.set(name.toLowerCase(), name);
+    }
+  } catch {
+    // No labels yet / gh error — start empty; missing ones are created below.
+  }
+  knownLabels.set(repoPath, index);
+  return index;
+}
+
+/**
+ * Resolve requested labels to names that actually exist on the repo: reuse an
+ * existing label that matches case-insensitively (so "Bug" maps to a repo's
+ * "bug" rather than colliding), and create any genuinely missing ones. This
+ * keeps `gh issue create --label` from failing on repos without the planning
+ * taxonomy (proposed / Bug / FE / BE / AI / Infra).
+ */
+async function ensureLabels(repoPath: string, labels: string[]): Promise<string[]> {
+  const index = await labelIndex(repoPath);
+  const resolved: string[] = [];
+  for (const label of labels) {
+    const key = label.toLowerCase();
+    const existing = index.get(key);
+    if (existing) {
+      resolved.push(existing);
+      continue;
+    }
+    await gh(repoPath, ['label', 'create', label, '--force', '--color', LABEL_COLORS[key] ?? 'C5C5C5']);
+    index.set(key, label);
+    resolved.push(label);
+  }
+  return resolved;
+}
+
+/** Create a GitHub issue (planning-pass approvals). Ensures its labels exist first. */
 export async function createIssue(
   repoPath: string,
   title: string,
   body: string,
   labels: string[]
 ): Promise<{ number: number; url: string }> {
-  let ensured = proposedLabelEnsured.get(repoPath);
-  if (!ensured) {
-    ensured = gh(repoPath, [
-      'label',
-      'create',
-      'proposed',
-      '--force',
-      '--color',
-      'BFD4F2',
-      '--description',
-      'Proposed by a planning pass, pending pickup',
-    ]).then(() => undefined);
-    proposedLabelEnsured.set(repoPath, ensured);
-  }
-  await ensured.catch(() => {
-    proposedLabelEnsured.delete(repoPath);
-  });
+  const resolved = await ensureLabels(repoPath, labels);
 
   const args = ['issue', 'create', '--title', title, '--body', body];
-  for (const label of labels) args.push('--label', label);
+  for (const label of resolved) args.push('--label', label);
   const stdout = await gh(repoPath, args);
   const url = stdout.trim().split('\n').pop() ?? '';
   const match = url.match(/\/issues\/(\d+)/);
