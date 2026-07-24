@@ -14,13 +14,35 @@
  * `prompt` log event.
  */
 
+/** Render step 5's review instruction from the repo's configured reviewer agents. */
+function reviewStep(reviewerAgents: string[]): string {
+  if (reviewerAgents.length === 0) {
+    return `5. Before committing, self-review your change for correctness and adherence to the repository's CLAUDE.md conventions.`;
+  }
+  const quoted = reviewerAgents.map((name) => `\`${name}\``);
+  const names =
+    quoted.length === 1
+      ? quoted[0]
+      : `${quoted.slice(0, -1).join(', ')} and ${quoted[quoted.length - 1]}`;
+  const one = reviewerAgents.length === 1;
+  return (
+    `5. Before committing, you MUST run code review${one ? '' : 's'} from the ${names} ` +
+    `agent${one ? '' : 's'} — invoke ${one ? 'it' : 'each'} via the Task tool (subagent_type = the agent name)` +
+    `${one ? '' : ', in parallel'}. Apply fixes for ${one ? 'its' : 'their'} confirmed findings ` +
+    `(re-running lint/unit tests after), then commit. The orchestrator BLOCKS \`git commit\` until ` +
+    `${one ? 'this review has' : 'ALL of these reviews have'} run — never skip ${one ? 'it' : 'this'}, ` +
+    `even for small or docs-only changes.`
+  );
+}
+
 export function buildPrompt(
   issueNumber: number,
   worktreePath: string,
   branch: string,
   goal: string,
   memory: string,
-  useWorkflow = false
+  useWorkflow = false,
+  reviewerAgents: string[] = []
 ): string {
   const lines = [
     `You are an autonomous engineering agent working on GitHub issue #${issueNumber} of this repository.`,
@@ -34,7 +56,7 @@ export function buildPrompt(
       ? `3. Implement the change. For large or multi-part tasks, orchestrate instead of grinding serially: fan out subagents (and workflow tooling if available) for independent parts — parallel exploration of separate modules, parallel implementation of independent pieces, reviews in parallel — then integrate their results yourself.`
       : `3. Implement the change yourself, directly — do NOT fan out subagents or workflows for the implementation (reviews in step 5 still use their agents).`,
     `4. Verify with lint and unit tests ONLY. NEVER run e2e tests, NEVER run database migrations, and NEVER run \`make db-migrate-prod\` or any deploy/prod command.`,
-    `5. Before committing, ALWAYS request code reviews from BOTH the \`code-architect\` AND the \`data-privacy-reviewer\` agents (run them in parallel). Apply fixes for their confirmed findings (re-running lint/unit tests after), and only then commit. Never skip this step, even for small or docs-only changes.`,
+    reviewStep(reviewerAgents),
     `6. Commit your work with conventional commit messages.`,
     `7. STOP after committing. NEVER run \`git push\` and NEVER run \`gh pr create\` — the developer reviews and pushes from the orchestrator dashboard. End your final message with a short summary of what you changed and why.`,
     ``,

@@ -98,6 +98,17 @@ function createInputQueue(): InputQueue {
 // globalThis-guarded registry
 // ---------------------------------------------------------------------------
 
+/**
+ * The pre-commit review gate for one session. `required` is the configured
+ * reviewer subagent names (lowercased); `seen` are the ones actually invoked
+ * via the Task tool this session. `git commit` is denied until seen ⊇ required.
+ * Empty `required` = no gate.
+ */
+interface ReviewGate {
+  required: Set<string>;
+  seen: Set<string>;
+}
+
 interface LiveSession {
   repo: RepoInfo;
   issueNumber: number;
@@ -282,7 +293,8 @@ function isOutsideWorktree(rawPath: string, worktreePath: string): boolean {
 function makeCanUseTool(
   repo: RepoInfo,
   issueNumber: number,
-  worktreePath: string
+  worktreePath: string,
+  gate: ReviewGate
 ): CanUseTool {
   return async (toolName, input) => {
     const deny = (reason: string, detail: string) => {
@@ -293,8 +305,39 @@ function makeCanUseTool(
       };
     };
 
+    // Record reviewer subagent invocations toward the pre-commit gate (allow all Task calls).
+    if (toolName === 'Task') {
+      const sub =
+        typeof input.subagent_type === 'string' ? input.subagent_type.trim().toLowerCase() : '';
+      if (sub && gate.required.has(sub)) gate.seen.add(sub);
+      return { behavior: 'allow', updatedInput: input };
+    }
+
     if (toolName === 'Bash') {
       const command = typeof input.command === 'string' ? input.command : '';
+
+      // Hard gate: block `git commit` until every configured reviewer has run.
+      // NOTE: a bespoke message (not deny()) — we WANT a retry after reviewing.
+      if (gate.required.size > 0 && GIT_COMMIT_PATTERN.test(command)) {
+        const missing = [...gate.required].filter((name) => !gate.seen.has(name));
+        if (missing.length > 0) {
+          emit({
+            repo,
+            issueNumber,
+            log: makeLog('error', `Blocked git commit — reviews pending: ${missing.join(', ')}`),
+          });
+          return {
+            behavior: 'deny',
+            message:
+              `Blocked by the orchestrator: mandatory code review is not complete. ` +
+              `Run the ${missing.map((m) => `"${m}"`).join(' and ')} review${
+                missing.length === 1 ? '' : 's'
+              } first via the Task tool (subagent_type = the agent name), apply the findings, ` +
+              `then retry the commit. This is required — do not work around it.`,
+          };
+        }
+      }
+
       const reason = deniedBashReason(command, worktreePath);
       if (reason) return deny(reason, `command: ${oneLine(command)}`);
     } else if (FILE_PATH_TOOLS.has(toolName)) {
@@ -337,6 +380,12 @@ const EXECUTION_MODEL = 'claude-opus-4-8';
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const TEST_COMMAND_PATTERN =
   /\b(test|tests|lint|ruff|eslint|pytest|vitest|jest|tsc|typecheck)\b/;
+/**
+ * A `git commit` in any spelling — used to log commits AND to gate them behind
+ * the review requirement. Tolerates `git -C dir commit` and compound commands;
+ * the `(?!-)` skips maintenance subcommands like `git commit-graph`/`commit-tree`.
+ */
+const GIT_COMMIT_PATTERN = /\bgit\b[^&|;\n]*\bcommit\b(?!-)/;
 
 function logForToolUse(
   name: string,
@@ -348,7 +397,7 @@ function logForToolUse(
   if (name === 'Bash') {
     const command = oneLine(typeof input.command === 'string' ? input.command : '');
     let kind: LogEvent['kind'] = 'tool';
-    if (/^git\s+commit\b/.test(command)) kind = 'commit';
+    if (GIT_COMMIT_PATTERN.test(command)) kind = 'commit';
     else if (TEST_COMMAND_PATTERN.test(command)) kind = 'test';
     return makeLog(kind, `Bash: ${command}`);
   }
@@ -502,7 +551,8 @@ export async function startSession(
   worktreePath: string,
   branch: string,
   model?: string,
-  useWorkflow = false
+  useWorkflow = false,
+  reviewerAgents: string[] = []
 ): Promise<void> {
   const { sessions } = registry();
   const key = sessionKey(repo.id, issueNumber);
@@ -512,7 +562,19 @@ export async function startSession(
 
   const input = createInputQueue();
   const { goal, memory } = await readSettings(repo.path);
-  const taskPrompt = buildPrompt(issueNumber, worktreePath, branch, goal, memory, useWorkflow);
+  const gate: ReviewGate = {
+    required: new Set(reviewerAgents.map((name) => name.trim().toLowerCase())),
+    seen: new Set<string>(),
+  };
+  const taskPrompt = buildPrompt(
+    issueNumber,
+    worktreePath,
+    branch,
+    goal,
+    memory,
+    useWorkflow,
+    reviewerAgents
+  );
   input.push({
     type: 'user',
     message: {
@@ -591,7 +653,7 @@ export async function startSession(
       // No interactive prompts: edits auto-accepted, everything else decided
       // programmatically by canUseTool (allow-all except the deny patterns).
       permissionMode: 'acceptEdits',
-      canUseTool: makeCanUseTool(repo, issueNumber, worktreePath),
+      canUseTool: makeCanUseTool(repo, issueNumber, worktreePath, gate),
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       mcpServers: { orchestrator: askUserServer },
       allowedTools: ['mcp__orchestrator__ask_user', 'mcp__orchestrator__save_memory'],

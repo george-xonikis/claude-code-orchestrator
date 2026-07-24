@@ -1,6 +1,7 @@
 import type { RepoInfo, Task } from '@/lib/types';
+import { requireReviewerAgents } from './agents';
+import { getExecutionConfig, setExecutionConfig } from './execution';
 import * as github from './github';
-import { getPlanningConfig, setPlanningConfig } from './planning';
 import { loadRepos } from './repos';
 import * as sessions from './sessions';
 import * as state from './state';
@@ -180,6 +181,11 @@ async function claim(
   const s = repoLoop(repo.id);
   s.active.add(issueNumber); // Reserve the slot up front.
   try {
+    // Gate: the session's configured reviewer agents must exist before we start
+    // (throws here → caught below → task failed + issue comment). Validating
+    // before the worktree avoids creating a doomed one.
+    const { reviewerAgents } = await getExecutionConfig(repo);
+    await requireReviewerAgents(repo, reviewerAgents);
     await github.setLabels(repo.path, issueNumber, ['agent-working']);
     const wt = await worktrees.createWorktree(repo.path, issueNumber);
     await state.upsertTask(repo.path, {
@@ -193,7 +199,15 @@ async function claim(
       prNumber: undefined,
       prUrl: undefined,
     });
-    await sessions.startSession(repo, issueNumber, wt.path, wt.branch, model, useWorkflow);
+    await sessions.startSession(
+      repo,
+      issueNumber,
+      wt.path,
+      wt.branch,
+      model,
+      useWorkflow,
+      reviewerAgents
+    );
   } catch (err) {
     s.active.delete(issueNumber);
     const message = err instanceof Error ? err.message : String(err);
@@ -329,7 +343,7 @@ async function poll(repo: RepoInfo): Promise<void> {
  */
 async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
   if (!repo.htmlUrl) return;
-  const { autoStart: enabled, maxActive, queueOrder, tasksPerRun } = await getPlanningConfig(repo);
+  const { autoStart: enabled, maxActive, queueOrder, tasksPerRun } = await getExecutionConfig(repo);
 
   // A fresh run (off -> on) resets the per-run task counter.
   if (enabled && !s.autoStartWas) s.executedThisRun = 0;
@@ -339,7 +353,7 @@ async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
   // Hit the per-run cap → turn auto-pickup off (in-flight sessions keep running).
   const capReached = () => tasksPerRun !== null && s.executedThisRun >= tasksPerRun;
   if (capReached()) {
-    await setPlanningConfig(repo, { autoStart: false }).catch(() => {});
+    await setExecutionConfig(repo, { autoStart: false }).catch(() => {});
     s.autoStartWas = false;
     return;
   }
@@ -374,7 +388,7 @@ async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
 
   // If that filled the run's budget, stop auto-pickup so it doesn't keep going.
   if (capReached()) {
-    await setPlanningConfig(repo, { autoStart: false }).catch(() => {});
+    await setExecutionConfig(repo, { autoStart: false }).catch(() => {});
     s.autoStartWas = false;
   }
 }
@@ -430,7 +444,7 @@ async function pollAllRepos(): Promise<void> {
       try {
         await recoverStaleTasks(repo);
         const s = repoLoop(repo.id);
-        const { pollMinutes } = await getPlanningConfig(repo);
+        const { pollMinutes } = await getExecutionConfig(repo);
         // Poll GitHub only when due (skip entirely when off)...
         if (pollMinutes !== null && now - s.lastPolledAt >= pollMinutes * 60_000) {
           s.lastPolledAt = now;

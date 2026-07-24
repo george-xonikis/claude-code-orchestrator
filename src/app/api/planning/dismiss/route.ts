@@ -15,6 +15,7 @@ export async function POST(request: Request) {
     const body = (await request.json().catch(() => null)) as {
       passId?: unknown;
       proposalIds?: unknown;
+      reason?: unknown;
     } | null;
     if (
       !body ||
@@ -24,7 +25,8 @@ export async function POST(request: Request) {
     ) {
       return badRequest('Provide passId (string) and proposalIds (string[])');
     }
-    await dismissProposals(repo, body.passId, body.proposalIds);
+    const reason = typeof body.reason === 'string' ? body.reason : undefined;
+    await dismissProposals(repo, body.passId, body.proposalIds, reason);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err);

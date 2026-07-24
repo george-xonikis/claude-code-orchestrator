@@ -27,17 +27,24 @@ export async function POST(request: Request) {
     const body = (await request.json().catch(() => null)) as {
       goal?: unknown;
       memory?: unknown;
+      planningMemory?: unknown;
     } | null;
-    if (!body || (body.goal === undefined && body.memory === undefined)) {
-      return badRequest('Provide goal and/or memory');
+    if (
+      !body ||
+      (body.goal === undefined && body.memory === undefined && body.planningMemory === undefined)
+    ) {
+      return badRequest('Provide goal, memory, and/or planningMemory');
     }
-    if (body.goal !== undefined && typeof body.goal !== 'string') {
-      return badRequest('goal must be a string');
+    for (const key of ['goal', 'memory', 'planningMemory'] as const) {
+      if (body[key] !== undefined && typeof body[key] !== 'string') {
+        return badRequest(`${key} must be a string`);
+      }
     }
-    if (body.memory !== undefined && typeof body.memory !== 'string') {
-      return badRequest('memory must be a string');
-    }
-    await writeSettings(repo.path, { goal: body.goal, memory: body.memory });
+    await writeSettings(repo.path, {
+      goal: body.goal as string | undefined,
+      memory: body.memory as string | undefined,
+      planningMemory: body.planningMemory as string | undefined,
+    });
     return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err);

@@ -1,4 +1,4 @@
-import type { DiscussionMessage, PlanningPass, Task, TaskStatus } from '@/lib/types';
+import type { AgentMeta, DiscussionMessage, PlanningPass, Task, TaskStatus } from '@/lib/types';
 
 // Re-exported so existing importers keep resolving it from this module.
 export type { DiscussionMessage };
@@ -72,7 +72,10 @@ export function setTaskStatus(
 
 export interface OrchestratorSettings {
   goal: string;
+  /** Execution memory: codebase gotchas agents hit while implementing. */
   memory: string;
+  /** Planning memory: prioritization guidance the PE/PM personas read. */
+  planningMemory: string;
 }
 
 export async function getSettings(repoId: string): Promise<OrchestratorSettings> {
@@ -118,16 +121,6 @@ export interface PlanningConfig {
   roles: PlanningRole[];
   /** Auto-file a scheduled pass's top proposals as issues. */
   autoFile: boolean;
-  /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
-  autoStart: boolean;
-  /** Order the pickup queue drains: oldest issue first, or newest first. */
-  queueOrder: 'oldest' | 'newest';
-  /** How often the loop polls GitHub for this repo's issues, in minutes; null = off. */
-  pollMinutes: number | null;
-  /** Max tasks auto-pickup executes per run before stopping; null = unlimited. */
-  tasksPerRun: number | null;
-  /** Max concurrent agent sessions the loop may auto-start. */
-  maxActive: number;
   /** Max top-ranked proposals a scheduled pass auto-files per run. */
   maxAutoFile: number;
   /** Max proposals a pass produces. */
@@ -140,10 +133,56 @@ export interface PlanningConfig {
   topics: string[];
 }
 
+/** Per-repo execution config — the auto-pickup loop + the pre-commit review gate. */
+export interface ExecutionConfig {
+  /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
+  autoStart: boolean;
+  /** Order the pickup queue drains: oldest issue first, or newest first. */
+  queueOrder: 'oldest' | 'newest';
+  /** Max concurrent agent sessions the loop may auto-start. */
+  maxActive: number;
+  /** Max tasks auto-pickup executes per run before stopping; null = unlimited. */
+  tasksPerRun: number | null;
+  /** How often the loop polls GitHub for this repo's issues, in minutes; null = off. */
+  pollMinutes: number | null;
+  /** Reviewer subagent `name`s an execution agent MUST run before it may commit; empty = no gate. */
+  reviewerAgents: string[];
+}
+
 export async function getPlanningConfig(repoId: string): Promise<PlanningConfig> {
   const res = await fetch(`/api/planning/config${repoQuery(repoId)}`);
   if (!res.ok) throw new Error(`GET /api/planning/config failed with ${res.status}`);
   return (await res.json()) as PlanningConfig;
+}
+
+export async function getExecutionConfig(repoId: string): Promise<ExecutionConfig> {
+  const res = await fetch(`/api/execution/config${repoQuery(repoId)}`);
+  if (!res.ok) throw new Error(`GET /api/execution/config failed with ${res.status}`);
+  return (await res.json()) as ExecutionConfig;
+}
+
+/** Patch execution config; the server validates/clamps and returns the saved config. */
+export async function setExecutionConfig(
+  repoId: string,
+  patch: Partial<ExecutionConfig>
+): Promise<ExecutionConfig> {
+  const res = await fetch(`/api/execution/config${repoQuery(repoId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `POST /api/execution/config failed with ${res.status}`);
+  }
+  return (await res.json()) as ExecutionConfig;
+}
+
+/** The repo's invocable subagents (from .claude/agents/), for the reviewer picker. */
+export async function getRepoAgents(repoId: string): Promise<AgentMeta[]> {
+  const res = await fetch(`/api/agents${repoQuery(repoId)}`);
+  if (!res.ok) throw new Error(`GET /api/agents failed with ${res.status}`);
+  return (await res.json()) as AgentMeta[];
 }
 
 /** Patch the config; the server validates/clamps and returns the saved config. */
@@ -238,8 +277,9 @@ export function dismissPlanningProposals(
   repoId: string,
   passId: string,
   proposalIds: string[],
+  reason?: string,
 ): Promise<void> {
-  return post(`/api/planning/dismiss${repoQuery(repoId)}`, { passId, proposalIds });
+  return post(`/api/planning/dismiss${repoQuery(repoId)}`, { passId, proposalIds, reason });
 }
 
 export function replyTask(repoId: string, issueNumber: number, message: string): Promise<void> {

@@ -15,7 +15,7 @@ import {
   synthesisPrompt,
   UPDATE_PROPOSAL_TOOL_DESCRIPTION,
 } from './prompts';
-import { readSettings } from './settings';
+import { appendPlanningMemory, readSettings } from './settings';
 
 export type { DiscussionMessage } from './prompts';
 
@@ -90,16 +90,6 @@ export interface PlanningConfig {
   roles: PlanningRole[];
   /** Auto-file a scheduled pass's top proposals as issues. */
   autoFile: boolean;
-  /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
-  autoStart: boolean;
-  /** Order the pickup queue drains: oldest issue first, or newest first. */
-  queueOrder: 'oldest' | 'newest';
-  /** How often the loop polls GitHub for this repo's issues, in minutes; null = off. */
-  pollMinutes: number | null;
-  /** Max tasks auto-pickup executes per run before stopping; null = unlimited. */
-  tasksPerRun: number | null;
-  /** Max concurrent agent sessions the loop may auto-start. */
-  maxActive: number;
   /** Max top-ranked proposals a scheduled pass may auto-file per run. */
   maxAutoFile: number;
   /** Max proposals a pass produces (synthesis cap). */
@@ -121,11 +111,6 @@ const CONFIG_DEFAULTS: PlanningConfig = {
   intervalHours: null,
   roles: ['engineer', 'pm'],
   autoFile: false,
-  autoStart: false,
-  queueOrder: 'oldest',
-  pollMinutes: 2,
-  tasksPerRun: null,
-  maxActive: 2,
   maxAutoFile: 3,
   maxProposals: 9,
   minImpact: 3,
@@ -168,7 +153,7 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
   try {
     const raw = await fsp.readFile(planningFile(repoPath), 'utf8');
     const parsed = JSON.parse(raw) as Partial<PlanningConfig> & {
-      /** Legacy single master toggle — migrated to autoFile + autoStart. */
+      /** Legacy single master toggle — migrated to autoFile (autoStart now lives in execution config). */
       autonomous?: boolean;
       passes?: PlanningPass[];
     };
@@ -177,12 +162,6 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       intervalHours: parsed.intervalHours ?? null,
       roles: sanitizeRoles(parsed.roles),
       autoFile: parsed.autoFile ?? legacyAutonomous,
-      autoStart: parsed.autoStart ?? legacyAutonomous,
-      queueOrder: parsed.queueOrder === 'newest' ? 'newest' : 'oldest',
-      pollMinutes:
-        parsed.pollMinutes === undefined ? 2 : parsed.pollMinutes === null ? null : clampInt(parsed.pollMinutes, 1, 60, 2),
-      tasksPerRun: parsed.tasksPerRun == null ? null : clampInt(parsed.tasksPerRun, 1, 100, 4),
-      maxActive: clampInt(parsed.maxActive, 1, 10, CONFIG_DEFAULTS.maxActive),
       maxAutoFile: clampInt(parsed.maxAutoFile, 0, 9, CONFIG_DEFAULTS.maxAutoFile),
       maxProposals: clampInt(parsed.maxProposals, 1, 20, CONFIG_DEFAULTS.maxProposals),
       minImpact: clampInt(parsed.minImpact, 1, 5, CONFIG_DEFAULTS.minImpact),
@@ -266,15 +245,6 @@ export async function setPlanningConfig(
   if (patch.intervalHours !== undefined) store.intervalHours = patch.intervalHours;
   if (patch.roles !== undefined) store.roles = sanitizeRoles(patch.roles);
   if (patch.autoFile !== undefined) store.autoFile = patch.autoFile;
-  if (patch.autoStart !== undefined) store.autoStart = patch.autoStart;
-  if (patch.queueOrder !== undefined)
-    store.queueOrder = patch.queueOrder === 'newest' ? 'newest' : 'oldest';
-  if (patch.pollMinutes !== undefined)
-    store.pollMinutes =
-      patch.pollMinutes === null ? null : clampInt(patch.pollMinutes, 1, 60, store.pollMinutes ?? 2);
-  if (patch.tasksPerRun !== undefined)
-    store.tasksPerRun = patch.tasksPerRun === null ? null : clampInt(patch.tasksPerRun, 1, 100, 4);
-  if (patch.maxActive !== undefined) store.maxActive = clampInt(patch.maxActive, 1, 10, store.maxActive);
   if (patch.maxAutoFile !== undefined)
     store.maxAutoFile = clampInt(patch.maxAutoFile, 0, 9, store.maxAutoFile);
   if (patch.maxProposals !== undefined)
@@ -418,6 +388,7 @@ async function runPlanningAgent(
   defFile: string,
   exclusions: string,
   shaping: ProposalShaping,
+  planningMemory: string,
   onEvent?: (event: LogEvent) => void,
   abortController?: AbortController
 ): Promise<string> {
@@ -425,7 +396,7 @@ async function runPlanningAgent(
   const body = definition.replace(/^---[\s\S]*?---\s*/, '');
   return runPlanningQuery(
     repoPath,
-    planningAgentPrompt(body, exclusions, shaping),
+    planningAgentPrompt(body, exclusions, shaping, planningMemory),
     abortController ? { abortController } : undefined,
     onEvent
   );
@@ -546,6 +517,8 @@ export async function startPlanningPass(
     maxProposals: store.maxProposals,
   };
   const personas = await requirePersonaFiles(repo, roles);
+  // Prioritization guidance the personas learn from (dismiss reasons + hand edits).
+  const { planningMemory } = await readSettings(repo.path);
   g.running = true;
   g.cancelled = false;
   const abort = new AbortController();
@@ -601,6 +574,7 @@ export async function startPlanningPass(
             personas[role],
             exclusions,
             shaping,
+            planningMemory,
             record(role),
             abort
           );
@@ -609,7 +583,7 @@ export async function startPlanningPass(
       const proposals = parseProposals(
         await runPlanningQuery(
           repo.path,
-          synthesisPrompt(reports.engineer, reports.pm, exclusions, shaping),
+          synthesisPrompt(reports.engineer, reports.pm, exclusions, shaping, planningMemory),
           { abortController: abort },
           record('synthesis')
         )
@@ -709,14 +683,27 @@ async function autoFileTopProposals(repo: RepoInfo, passId: string): Promise<voi
 export async function dismissProposals(
   repo: RepoInfo,
   passId: string,
-  proposalIds: string[]
+  proposalIds: string[],
+  reason?: string
 ): Promise<void> {
+  const dismissedTitles: string[] = [];
   await updatePass(repo.path, passId, (pass) => {
     for (const id of proposalIds) {
       const proposal = pass.proposals.find((p) => p.id === id);
-      if (proposal && proposal.status === 'pending') proposal.status = 'dismissed';
+      if (proposal && proposal.status === 'pending') {
+        proposal.status = 'dismissed';
+        dismissedTitles.push(proposal.title);
+      }
     }
   });
+  // A reason is prioritization signal — record it so future passes learn from it.
+  const note = reason?.trim();
+  if (note && dismissedTitles.length > 0) {
+    await appendPlanningMemory(
+      repo.path,
+      `Rejected "${dismissedTitles.join('", "')}": ${note}`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -39,7 +39,8 @@ export function synthesisPrompt(
   engineerReport: string,
   pmReport: string,
   exclusions: string,
-  shaping: ProposalShaping
+  shaping: ProposalShaping,
+  planningMemory: string
 ): string {
   return [
     'You are the synthesis step of a planning meeting between a Principal',
@@ -54,6 +55,16 @@ export function synthesisPrompt(
     '- Drop anything that serves no stated goal priority.',
     `- Keep at most ${shaping.maxProposals} items, ranked by leverage.`,
     ...shapingConstraints(shaping),
+    ...(planningMemory.trim()
+      ? [
+          '- Honor the developer\'s prioritization guidance below — drop items it says',
+          '  they do not want, even if the personas surfaced them.',
+          '',
+          'PRIORITIZATION GUIDANCE (developer-maintained):',
+          planningMemory.trim(),
+          '',
+        ]
+      : []),
     ...(exclusions
       ? [
           '- BACKSTOP: drop any item matching the previously-proposed list below,',

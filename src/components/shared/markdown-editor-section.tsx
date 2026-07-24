@@ -38,7 +38,8 @@ export function MarkdownEditorSection({
   onChange,
   onSave,
 }: {
-  title: string;
+  /** Omit when the surrounding tab header already names this field. */
+  title?: string;
   description: string;
   value: string;
   minHeightClass: string;
@@ -63,9 +64,13 @@ export function MarkdownEditorSection({
   };
 
   return (
-    <section className="rounded-lg bg-elevated-secondary p-5">
+    <section className="flex flex-col py-6">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-bold">{title}</h2>
+        {title ? (
+          <h2 className="text-base font-medium text-foreground">{title}</h2>
+        ) : (
+          <span />
+        )}
         <div className="flex shrink-0 items-center gap-3">
           {saved && <span className="text-xs font-medium text-success">Saved</span>}
           {editing && (
@@ -81,18 +86,18 @@ export function MarkdownEditorSection({
           <EditToggle editing={editing} onChange={setEditing} />
         </div>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+      <p className={`text-sm text-muted-foreground ${title ? 'mt-1' : ''}`}>{description}</p>
 
       {editing ? (
         <textarea
           value={value}
           onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
-          className={`mt-3 w-full rounded-md border border-border bg-main-surface-primary px-3 py-2 font-mono text-xs leading-5 placeholder:text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50 ${minHeightClass}`}
+          className={`mt-3 w-full rounded-md border border-border bg-elevated-secondary px-3 py-2 font-mono text-xs leading-5 placeholder:text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50 ${minHeightClass}`}
         />
       ) : (
         <div
-          className={`markdown-preview mt-3 overflow-auto rounded-md border border-border bg-main-surface-primary px-4 py-3 ${minHeightClass}`}
+          className={`markdown-preview mt-3 overflow-auto rounded-md border border-border bg-elevated-secondary px-4 py-3 ${minHeightClass}`}
         >
           {value.trim() ? (
             <Markdown remarkPlugins={[remarkGfm]}>{value}</Markdown>

@@ -29,10 +29,25 @@ function steeringLines(shaping: ProposalShaping): string {
   return lines.join(' ');
 }
 
+/** Prioritization guidance block, from planning-memory.md — what the developer values / keeps rejecting. */
+function planningMemoryBlock(planningMemory: string): string {
+  const trimmed = planningMemory.trim();
+  if (!trimmed) return '';
+  return [
+    'PRIORITIZATION GUIDANCE — the developer maintains these rules about what is',
+    'worth proposing for this project (learned from proposals they dismissed).',
+    'Respect them: do NOT surface work they have told you they do not want, and',
+    'lean toward what they value.',
+    '',
+    trimmed,
+  ].join('\n');
+}
+
 export function planningAgentPrompt(
   personaBody: string,
   exclusions: string,
-  shaping: ProposalShaping
+  shaping: ProposalShaping,
+  planningMemory: string
 ): string {
   const preamble = [
     'Run a planning pass NOW on the repository you are in.',
@@ -40,8 +55,13 @@ export function planningAgentPrompt(
     'create issues — return your ranked proposals as your final message, in the',
     'output format the instructions specify.',
   ].join(' ');
-  const sections = [preamble, steeringLines(shaping), exclusions, '---', personaBody].filter(
-    Boolean
-  );
+  const sections = [
+    preamble,
+    steeringLines(shaping),
+    planningMemoryBlock(planningMemory),
+    exclusions,
+    '---',
+    personaBody,
+  ].filter(Boolean);
   return sections.join('\n\n');
 }

@@ -7,11 +7,11 @@ import type { Task, TaskStatus } from '@/lib/types';
 import { LABEL_COLORS } from '@/components/shared/label-chip';
 import {
   countActiveSessions,
-  getPlanningConfig,
+  type ExecutionConfig,
+  getExecutionConfig,
   isNonAgentTask,
-  type PlanningConfig,
   pollNow,
-  setPlanningConfig,
+  setExecutionConfig,
   stopAllTasks,
 } from '@/components/shared/task-actions';
 import { AddRepoModal } from '@/components/add-repo-modal';
@@ -54,7 +54,7 @@ export function Board() {
   const [query, setQuery] = useState('');
   const [polling, setPolling] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [config, setConfig] = useState<PlanningConfig | null>(null);
+  const [config, setConfig] = useState<ExecutionConfig | null>(null);
   const [queueOpen, setQueueOpen] = useState(false);
   // Empty selection = show everything.
   const [activeLabels, setActiveLabels] = useState<ReadonlySet<string>>(new Set());
@@ -78,7 +78,7 @@ export function Board() {
   useEffect(() => {
     if (!current) return;
     const repoId = current.id;
-    const load = () => getPlanningConfig(repoId).then(setConfig).catch(() => {});
+    const load = () => getExecutionConfig(repoId).then(setConfig).catch(() => {});
     load();
     // Poll so the toggle reflects auto-pickup turning itself off at the per-run cap.
     const id = setInterval(load, 10_000);
@@ -89,7 +89,7 @@ export function Board() {
     if (!current) return;
     const repoId = current.id;
     setConfig((prev) => (prev ? { ...prev, autoStart: on } : prev)); // optimistic
-    setPlanningConfig(repoId, { autoStart: on })
+    setExecutionConfig(repoId, { autoStart: on })
       .then((saved) => {
         setConfig(saved);
         if (on) return pollNow(repoId); // kick a cycle so pickup starts now
@@ -111,7 +111,7 @@ export function Board() {
     setStopping(true);
     // Also turn auto-pickup off, otherwise the loop would re-claim what we stop.
     setConfig((prev) => (prev ? { ...prev, autoStart: false } : prev));
-    setPlanningConfig(repoId, { autoStart: false }).then(setConfig).catch(() => {});
+    setExecutionConfig(repoId, { autoStart: false }).then(setConfig).catch(() => {});
     stopAllTasks(repoId, tasks)
       .catch(() => {})
       .finally(() => setStopping(false));

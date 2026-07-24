@@ -22,6 +22,16 @@ export interface RepoInfo {
   htmlUrl?: string;
 }
 
+/** One invocable subagent discovered under a repo's .claude/agents/ (frontmatter `name` == Task subagent_type). */
+export interface AgentMeta {
+  /** Frontmatter `name` — the string passed as `subagent_type` to the Task tool. */
+  name: string;
+  /** Frontmatter `description` (may be empty). */
+  description: string;
+  /** The .md filename (for display / debugging). */
+  file: string;
+}
+
 export type TaskStatus = 'ready' | 'working' | 'needs_input' | 'committed' | 'pr_open' | 'failed';
 
 export interface Task {

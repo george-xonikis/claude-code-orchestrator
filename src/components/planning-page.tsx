@@ -266,6 +266,9 @@ export function PlanningPage() {
   const [busy, setBusy] = useState(false);
   const [filingPassId, setFilingPassId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  // Pending dismissal awaiting an optional reason (fed back into planning memory).
+  const [dismissing, setDismissing] = useState<{ passId: string; ids: string[] } | null>(null);
+  const [dismissReason, setDismissReason] = useState('');
   const [config, setConfig] = useState<PlanningConfig | null>(null);
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
     null
@@ -369,6 +372,28 @@ export function PlanningPage() {
       .finally(() => {
         setBusy(false);
         setFilingPassId(null);
+      });
+  };
+
+  /** Confirm a pending dismissal, recording the optional reason into planning memory. */
+  const confirmDismiss = () => {
+    if (!repoId || !dismissing) return;
+    const { passId, ids } = dismissing;
+    setBusy(true);
+    dismissPlanningProposals(repoId, passId, ids, dismissReason.trim() || undefined)
+      .then(() =>
+        setSelected((prev) => {
+          const next = new Set(prev);
+          for (const id of ids) next.delete(`${passId}:${id}`);
+          return next;
+        })
+      )
+      .then(refresh)
+      .catch(() => {})
+      .finally(() => {
+        setBusy(false);
+        setDismissing(null);
+        setDismissReason('');
       });
   };
 
@@ -481,7 +506,12 @@ export function PlanningPage() {
                   <button
                     type="button"
                     disabled={busy || selectedCount === 0}
-                    onClick={() => act(dismissPlanningProposals, pass)}
+                    onClick={() => {
+                      const ids = selectedIdsIn(pass);
+                      if (ids.length === 0) return;
+                      setDismissReason('');
+                      setDismissing({ passId: pass.id, ids });
+                    }}
                     className="inline-flex h-7 items-center rounded-md border border-border bg-elevated-secondary px-2.5 text-xs font-medium hover:bg-background-hover disabled:opacity-50"
                   >
                     Dismiss
@@ -489,6 +519,37 @@ export function PlanningPage() {
                 </div>
               )}
             </div>
+            {dismissing?.passId === pass.id && (
+              <div className="mb-2 flex items-center gap-2 rounded-md border border-border bg-elevated-secondary p-2">
+                <input
+                  autoFocus
+                  value={dismissReason}
+                  onChange={(e) => setDismissReason(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') confirmDismiss();
+                    if (e.key === 'Escape') setDismissing(null);
+                  }}
+                  placeholder={`Why dismiss ${dismissing.ids.length}? (optional — teaches future planning)`}
+                  maxLength={200}
+                  className="h-7 flex-1 rounded-md border border-border bg-main-surface-primary px-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
+                />
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={confirmDismiss}
+                  className="inline-flex h-7 items-center rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                >
+                  Dismiss
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDismissing(null)}
+                  className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
             {pass.status === 'running' && (
               <p className="text-sm text-muted-foreground">
                 {runningAgentsLabel(pass.roles)} scanning the repo — this takes a few minutes…
