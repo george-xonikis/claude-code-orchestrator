@@ -1,14 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Bot, ClipboardList, Info, SlidersHorizontal, Target, Users, X } from 'lucide-react';
+import { Bot, ClipboardList, Info, Target, Users, X } from 'lucide-react';
 
 import { MODEL_OPTIONS } from '@/lib/models';
 import type { AgentMeta } from '@/lib/types';
 import { EFFORT_METER, GradeMeterInput, IMPACT_METER } from '@/components/shared/grade-meter';
 import { MarkdownEditorSection } from '@/components/shared/markdown-editor-section';
 import { Switch } from '@/components/shared/switch';
-import { ThemeToggle } from '@/components/shared/theme-toggle';
 import {
   type ExecutionConfig,
   getExecutionConfig,
@@ -65,12 +64,6 @@ const TABS = [
     label: 'Goal',
     Icon: Target,
     description: 'The north star injected into planning and every agent session.',
-  },
-  {
-    value: 'preferences',
-    label: 'Preferences',
-    Icon: SlidersHorizontal,
-    description: 'Local appearance settings for this browser.',
   },
 ] as const;
 
@@ -701,14 +694,6 @@ export function SettingsPage() {
               onChange={setGoal}
               onSave={() => (repoId ? saveSettings(repoId, { goal }) : Promise.resolve())}
             />
-          )}
-
-          {tab === 'preferences' && (
-            <Section title="Appearance">
-              <Row label="Dark mode" hint="applies to this browser">
-                <ThemeToggle />
-              </Row>
-            </Section>
           )}
         </div>
       </div>

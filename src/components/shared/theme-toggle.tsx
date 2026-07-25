@@ -1,8 +1,7 @@
 'use client';
 
 import { useCallback, useSyncExternalStore } from 'react';
-
-import { Switch } from '@/components/shared/switch';
+import { Moon, Sun } from 'lucide-react';
 
 const THEME_STORAGE_KEY = 'orchestrator-theme';
 
@@ -19,8 +18,7 @@ function readTheme(): Theme {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 }
 
-/** Light/dark switch. State lives on <html data-theme>, persisted to localStorage. */
-export function ThemeToggle() {
+function useTheme(): [Theme, (next: Theme) => void] {
   const theme = useSyncExternalStore(subscribeToTheme, readTheme, () => 'light' as Theme);
 
   const setTheme = useCallback((next: Theme) => {
@@ -32,11 +30,22 @@ export function ThemeToggle() {
     }
   }, []);
 
+  return [theme, setTheme];
+}
+
+/** Top-bar light/dark toggle — the app's only theme control. */
+export function ThemeToggleButton() {
+  const [theme, setTheme] = useTheme();
+  const next = theme === 'dark' ? 'light' : 'dark';
   return (
-    <Switch
-      checked={theme === 'dark'}
-      onChange={(on) => setTheme(on ? 'dark' : 'light')}
-      label="Dark mode"
-    />
+    <button
+      type="button"
+      onClick={() => setTheme(next)}
+      aria-label={`Switch to ${next} mode`}
+      title={`Switch to ${next} mode`}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-elevated-secondary text-muted-foreground hover:bg-background-hover hover:text-foreground"
+    >
+      {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+    </button>
   );
 }

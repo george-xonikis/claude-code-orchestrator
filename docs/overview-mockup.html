@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <title>Claude Hydra — Overview (mockup)</title>
+    <style>
+      /* Tokens copied from src/app/globals.css so this mockup maps 1:1 to the app. */
+      :root {
+        --primary: rgb(37, 99, 235);
+        --primary-foreground: #fff;
+        --main-surface-primary: #fff;
+        --elevated-secondary: #f9f9f9;
+        --background-hover: #f2f3f5;
+        --foreground: rgb(30, 41, 59);
+        --muted-foreground: rgb(107, 114, 128);
+        --border: rgb(229, 231, 235);
+        --muted: rgb(243, 244, 246);
+        --secondary: rgb(243, 244, 246);
+        --secondary-foreground: rgb(55, 65, 81);
+        --success: rgb(16, 185, 129);
+        --success-muted: rgba(16, 185, 129, 0.15);
+        --destructive: rgb(248, 113, 113);
+        --destructive-muted: rgba(248, 113, 113, 0.15);
+        --warning: rgb(245, 158, 11);
+        --warning-muted: rgba(245, 158, 11, 0.15);
+        --info: rgb(59, 130, 246);
+        --info-muted: rgba(59, 130, 246, 0.15);
+      }
+      html[data-theme='dark'] {
+        --main-surface-primary: rgb(17, 24, 39);
+        --elevated-secondary: rgb(31, 41, 55);
+        --background-hover: #32363f;
+        --foreground: rgb(243, 244, 246);
+        --muted-foreground: rgb(156, 163, 175);
+        --border: rgb(55, 65, 81);
+        --muted: rgb(31, 41, 55);
+        --secondary: rgb(55, 65, 81);
+        --secondary-foreground: rgb(209, 213, 219);
+        --success-muted: rgba(16, 185, 129, 0.2);
+        --destructive-muted: rgba(248, 113, 113, 0.2);
+        --warning-muted: rgba(245, 158, 11, 0.2);
+        --info-muted: rgba(59, 130, 246, 0.2);
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: 'Geist', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        background: var(--main-surface-primary);
+        color: var(--foreground);
+        -webkit-font-smoothing: antialiased;
+      }
+      .mono { font-family: 'Geist Mono', ui-monospace, Menlo, monospace; }
+      .wrap { margin: 0 auto; width: 100%; max-width: 1600px; padding: 0 28px; }
+
+      /* ---------- top bar (unchanged from the app, + Overview nav item) ---------- */
+      header {
+        position: sticky; top: 0; z-index: 10;
+        border-bottom: 1px solid var(--border);
+        background: var(--main-surface-primary);
+      }
+      /* Vertical only — the .wrap gutter supplies the left/right padding, so the
+         logo and the theme button line up with the cards below. */
+      .bar { display: flex; align-items: center; justify-content: space-between; padding-block: 12px; gap: 20px; }
+      .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: inherit; }
+      .brand img { height: 32px; width: auto; border-radius: 6px; }
+      .brand span { font-size: 14px; font-weight: 700; }
+      nav { display: flex; align-items: center; gap: 4px; }
+      nav a {
+        display: inline-flex; align-items: center; height: 32px; padding: 0 12px;
+        border-radius: 6px; font-size: 14px; font-weight: 500;
+        color: var(--muted-foreground); text-decoration: none;
+      }
+      nav a.active { background: var(--background-hover); color: var(--foreground); }
+      .chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        border-radius: 9999px; padding: 4px 10px;
+        font-size: 12px; font-weight: 500;
+        background: var(--info-muted); color: var(--info);
+      }
+      .btn {
+        display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
+        border: 1px solid var(--border); border-radius: 6px;
+        background: var(--elevated-secondary); color: var(--foreground);
+        font-size: 12px; font-weight: 500; cursor: pointer;
+      }
+      .btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
+      /* The app's only theme control — repo Settings loses its Appearance row. */
+      .btn.icon { width: 32px; padding: 0; justify-content: center; color: var(--muted-foreground); }
+      .btn.icon:hover { background: var(--background-hover); color: var(--foreground); }
+
+      /* ---------- hero ---------- */
+      .hero {
+        display: flex; align-items: center; gap: 28px;
+        margin: 24px 0 20px; padding: 20px 24px;
+        border: 1px solid var(--border); border-radius: 14px;
+        background: var(--elevated-secondary);
+      }
+      .hero-art { height: 104px; width: auto; border-radius: 10px; flex: none; }
+      .hero-copy h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+      .hero-copy p { margin-top: 4px; font-size: 13px; color: var(--muted-foreground); max-width: 46ch; line-height: 1.5; }
+      .stats { display: flex; gap: 10px; margin-left: auto; flex: none; }
+      .stat {
+        min-width: 116px; padding: 12px 14px;
+        border: 1px solid var(--border); border-radius: 10px;
+        background: var(--main-surface-primary);
+      }
+      .stat .n { font-size: 26px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
+      .stat .k { margin-top: 2px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted-foreground); }
+      .stat.live .n { color: var(--info); }
+      .stat.attn .n { color: var(--warning); }
+      .stat.pr .n { color: var(--success); }
+
+      /* ---------- section head ---------- */
+      .sec { display: flex; align-items: center; gap: 10px; margin: 4px 0 12px; }
+      .sec h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted-foreground); }
+      .sec .rule { flex: 1; height: 1px; background: var(--border); }
+
+      /* ---------- repo grid ---------- */
+      .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding-bottom: 40px; }
+      .card {
+        display: flex; flex-direction: column; gap: 12px;
+        padding: 16px; border: 1px solid var(--border); border-radius: 12px;
+        background: var(--elevated-secondary); cursor: pointer;
+      }
+      .card:hover { background: var(--background-hover); }
+      .card.current { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+      .card.idle { opacity: 0.9; }
+
+      .card-head { display: flex; align-items: flex-start; gap: 8px; }
+      .dot { width: 8px; height: 8px; border-radius: 9999px; flex: none; margin-top: 6px; }
+      .dot.live { background: var(--info); box-shadow: 0 0 0 3px var(--info-muted); }
+      .dot.off { background: var(--muted-foreground); opacity: 0.45; }
+      .name { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
+      .path { margin-top: 2px; font-size: 11px; color: var(--muted-foreground); }
+      .tag {
+        margin-left: auto; flex: none;
+        display: inline-flex; align-items: center; gap: 5px;
+        border-radius: 9999px; padding: 3px 9px; font-size: 11px; font-weight: 600;
+      }
+      .tag.on { background: var(--success-muted); color: var(--success); }
+      .tag.off { background: var(--secondary); color: var(--secondary-foreground); }
+
+      /* running agents block */
+      .agents { display: flex; flex-direction: column; gap: 6px; }
+      .agents-head { display: flex; align-items: baseline; gap: 6px; }
+      .agents-head .n { font-size: 20px; font-weight: 700; line-height: 1; }
+      .agents-head .k { font-size: 12px; color: var(--muted-foreground); }
+      .row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 7px 9px; border-radius: 8px;
+        background: var(--main-surface-primary); border: 1px solid var(--border);
+        font-size: 12px;
+      }
+      .row .num { font-weight: 600; color: var(--muted-foreground); flex: none; }
+      .row .ttl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .meta { flex: none; font-size: 11px; color: var(--muted-foreground); }
+      .row.q { background: transparent; border-style: dashed; color: var(--muted-foreground); }
+      .pulse { display: inline-flex; gap: 2px; align-items: flex-end; height: 10px; flex: none; }
+      .pulse i { display: block; width: 2px; background: var(--info); border-radius: 1px; animation: bounce 1.1s ease-in-out infinite; }
+      .pulse i:nth-child(1) { height: 5px; animation-delay: 0s; }
+      .pulse i:nth-child(2) { height: 10px; animation-delay: 0.15s; }
+      .pulse i:nth-child(3) { height: 7px; animation-delay: 0.3s; }
+      @keyframes bounce { 0%, 100% { transform: scaleY(0.5); } 50% { transform: scaleY(1); } }
+      .wait { width: 10px; height: 10px; border-radius: 9999px; background: var(--warning-muted); border: 2px solid var(--warning); flex: none; }
+      .empty { font-size: 12px; color: var(--muted-foreground); padding: 10px 0 2px; }
+
+      /* status distribution */
+      .distro { display: flex; height: 6px; border-radius: 9999px; overflow: hidden; background: var(--muted); }
+      .distro span { display: block; }
+      .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--muted-foreground); }
+      .legend b { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 4px; }
+
+      .card-foot {
+        display: flex; align-items: center; gap: 10px;
+        border-top: 1px solid var(--border); padding-top: 10px; margin-top: auto;
+        font-size: 12px; color: var(--muted-foreground);
+      }
+      .card-foot .go { margin-left: auto; color: var(--primary); font-weight: 600; }
+
+      /* add-repo tile */
+      .add {
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+        min-height: 210px; border: 1px dashed var(--border); border-radius: 12px;
+        background: transparent; color: var(--muted-foreground); cursor: pointer;
+      }
+      .add .plus { font-size: 22px; line-height: 1; }
+      .add b { font-size: 13px; color: var(--foreground); }
+      .add small { font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap bar">
+        <!-- Board / Planning / Settings are repo-scoped, so they only appear
+             once you're inside a repo. The overview bar stays brand-only. -->
+        <a class="brand" href="#"><img src="../public/hydra-mark.png" alt="" /><span>Claude Hydra</span></a>
+        <div style="display: flex; align-items: center; gap: 12px">
+          <span class="chip">4 agents running · 2 repos active</span>
+          <button
+            class="btn icon"
+            aria-label="Toggle theme"
+            title="Toggle theme"
+            onclick="document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="wrap">
+      <section class="hero">
+        <img class="hero-art" src="../public/hydra-logo.png" alt="Claude Hydra" />
+        <div class="hero-copy">
+          <h1>Your fleet</h1>
+          <p>Every registered repo, the agents running in it right now, and what needs you. Pick a repo to jump straight to its board.</p>
+        </div>
+        <div class="stats">
+          <div class="stat live"><div class="n">4</div><div class="k">Agents</div></div>
+          <div class="stat attn"><div class="n">2</div><div class="k">Need input</div></div>
+          <div class="stat pr"><div class="n">5</div><div class="k">PRs open</div></div>
+          <div class="stat"><div class="n">4</div><div class="k">Repos</div></div>
+        </div>
+      </section>
+
+      <div class="sec"><h2>Repositories</h2><div class="rule"></div></div>
+
+      <div class="grid">
+        <!-- active + current -->
+        <article class="card current">
+          <div class="card-head">
+            <span class="dot live"></span>
+            <div>
+              <!-- Display name from the registry (repo.name), not the folder /
+                   GitHub name — the folder still shows in the path below. -->
+              <div class="name">Nous AI</div>
+              <div class="path mono">~/Downloads/Git/nous-ai</div>
+            </div>
+            <span class="tag on">Pickup on</span>
+          </div>
+
+          <div class="agents">
+            <div class="agents-head"><span class="n">3</span><span class="k">agents working · 1 planning pass</span></div>
+            <div class="row"><span class="pulse"><i></i><i></i><i></i></span><span class="num">#312</span><span class="ttl">Repo switcher: overview page</span><span class="meta">4m · opus-5</span></div>
+            <div class="row"><span class="pulse"><i></i><i></i><i></i></span><span class="num">#309</span><span class="ttl">Flaky auth test on CI</span><span class="meta">12m · fable-5</span></div>
+            <div class="row"><span class="wait"></span><span class="num">#305</span><span class="ttl">Needs input: which migration path?</span><span class="meta">waiting</span></div>
+          </div>
+
+          <div>
+            <div class="distro">
+              <span style="width: 30%; background: var(--secondary)"></span>
+              <span style="width: 20%; background: var(--info)"></span>
+              <span style="width: 10%; background: var(--warning)"></span>
+              <span style="width: 25%; background: var(--success)"></span>
+              <span style="width: 15%; background: var(--destructive)"></span>
+            </div>
+            <div class="legend" style="margin-top: 8px">
+              <span><b style="background: var(--secondary)"></b>6 ready</span>
+              <span><b style="background: var(--info)"></b>3 working</span>
+              <span><b style="background: var(--warning)"></b>1 needs input</span>
+              <span><b style="background: var(--success)"></b>4 PR open</span>
+              <span><b style="background: var(--destructive)"></b>2 failed</span>
+            </div>
+          </div>
+
+          <div class="card-foot"><span>Queue 6 · cap 3</span><span class="go">Open board →</span></div>
+        </article>
+
+        <!-- active, pickup paused -->
+        <article class="card">
+          <div class="card-head">
+            <span class="dot live"></span>
+            <div>
+              <div class="name">Kynth</div>
+              <div class="path mono">~/Downloads/Git/fitness-tracker</div>
+            </div>
+            <span class="tag off">Paused</span>
+          </div>
+
+          <div class="agents">
+            <div class="agents-head"><span class="n">1</span><span class="k">agent working</span></div>
+            <div class="row"><span class="pulse"><i></i><i></i><i></i></span><span class="num">#88</span><span class="ttl">Checkout: split payment step</span><span class="meta">31m · sonnet-5</span></div>
+            <div class="row"><span class="wait"></span><span class="num">#84</span><span class="ttl">Needs input: copy for empty cart</span><span class="meta">waiting</span></div>
+            <div class="row q"><span class="num">+9</span><span class="ttl">ready, queued behind pickup</span></div>
+          </div>
+
+          <div>
+            <div class="distro">
+              <span style="width: 55%; background: var(--secondary)"></span>
+              <span style="width: 8%; background: var(--info)"></span>
+              <span style="width: 8%; background: var(--warning)"></span>
+              <span style="width: 29%; background: var(--success)"></span>
+            </div>
+            <div class="legend" style="margin-top: 8px">
+              <span><b style="background: var(--secondary)"></b>9 ready</span>
+              <span><b style="background: var(--info)"></b>1 working</span>
+              <span><b style="background: var(--warning)"></b>1 needs input</span>
+              <span><b style="background: var(--success)"></b>1 PR open</span>
+            </div>
+          </div>
+
+          <div class="card-foot"><span>Queue 9 · cap 2</span><span class="go">Open board →</span></div>
+        </article>
+
+        <!-- idle -->
+        <article class="card idle">
+          <div class="card-head">
+            <span class="dot off"></span>
+            <div>
+              <div class="name">Claude Hydra</div>
+              <div class="path mono">~/Downloads/Git/claude-code-orchestrator</div>
+            </div>
+            <span class="tag off">Paused</span>
+          </div>
+
+          <div class="agents">
+            <div class="agents-head"><span class="n" style="color: var(--muted-foreground)">0</span><span class="k">agents · idle 2h</span></div>
+            <div class="empty">Nothing running. 3 tickets ready to pick up.</div>
+          </div>
+
+          <div>
+            <div class="distro">
+              <span style="width: 60%; background: var(--secondary)"></span>
+              <span style="width: 40%; background: var(--success)"></span>
+            </div>
+            <div class="legend" style="margin-top: 8px">
+              <span><b style="background: var(--secondary)"></b>3 ready</span>
+              <span><b style="background: var(--success)"></b>2 PR open</span>
+            </div>
+          </div>
+
+          <div class="card-foot"><span>Queue 3 · cap 1</span><span class="go">Open board →</span></div>
+        </article>
+
+        <!-- failing -->
+        <article class="card idle">
+          <div class="card-head">
+            <span class="dot off"></span>
+            <div>
+              <div class="name">Design System</div>
+              <div class="path mono">~/work/design-system</div>
+            </div>
+            <span class="tag off">Paused</span>
+          </div>
+
+          <div class="agents">
+            <div class="agents-head"><span class="n" style="color: var(--muted-foreground)">0</span><span class="k">agents · 2 failed sessions</span></div>
+            <div class="empty">Nothing running. Last failure 40m ago on #21.</div>
+          </div>
+
+          <div>
+            <div class="distro">
+              <span style="width: 34%; background: var(--secondary)"></span>
+              <span style="width: 66%; background: var(--destructive)"></span>
+            </div>
+            <div class="legend" style="margin-top: 8px">
+              <span><b style="background: var(--secondary)"></b>1 ready</span>
+              <span><b style="background: var(--destructive)"></b>2 failed</span>
+            </div>
+          </div>
+
+          <div class="card-foot"><span>Queue 1 · cap 1</span><span class="go">Open board →</span></div>
+        </article>
+
+        <button class="add"><span class="plus">+</span><b>Add repository</b><small>Register a local git checkout</small></button>
+      </div>
+    </div>
+  </body>
+</html>

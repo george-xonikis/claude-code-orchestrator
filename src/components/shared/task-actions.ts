@@ -1,19 +1,9 @@
 import type { AgentMeta, DiscussionMessage, PlanningPass, Task, TaskStatus } from '@/lib/types';
+import { ACTIVE_STATUSES } from '@/lib/task-helpers';
 
-// Re-exported so existing importers keep resolving it from this module.
+// Re-exported so existing importers keep resolving these from this module.
 export type { DiscussionMessage };
-
-/** Statuses with a live session (a paused question keeps its session alive). */
-export const ACTIVE_STATUSES: readonly TaskStatus[] = ['working', 'needs_input'];
-
-/** Tasks labeled "Non agent" must never be implemented by an agent. */
-export function isNonAgentTask(task: Task): boolean {
-  return (task.labels ?? []).some((label) => /^non[- ]?agent$/i.test(label));
-}
-
-export function countActiveSessions(tasks: Task[]): number {
-  return tasks.filter((task) => ACTIVE_STATUSES.includes(task.status)).length;
-}
+export { ACTIVE_STATUSES, countActiveSessions, isNonAgentTask } from '@/lib/task-helpers';
 
 /** Every API call is scoped to a registered repo via the `?repo=<id>` query param. */
 function repoQuery(repoId: string): string {

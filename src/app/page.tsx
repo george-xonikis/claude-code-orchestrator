@@ -1,9 +1,9 @@
-import { Board } from '@/components/board';
+import { OverviewPage } from '@/components/overview-page';
 
-export default function DashboardPage() {
+export default function FleetOverviewPage() {
   return (
     <main>
-      <Board />
+      <OverviewPage />
     </main>
   );
 }

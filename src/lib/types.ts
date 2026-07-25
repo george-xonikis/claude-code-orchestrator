@@ -108,6 +108,31 @@ export interface PlanningPass {
   logs?: PlanningLogLine[];
 }
 
+/** One live agent session on the overview page (status working or needs_input). */
+export interface OverviewSession {
+  issueNumber: number;
+  title: string;
+  status: Extract<TaskStatus, 'working' | 'needs_input'>;
+  model?: string;
+  startedAt?: string;
+}
+
+/** One repo's roll-up on GET /api/overview — everything a fleet card renders. */
+export interface RepoOverview {
+  repo: RepoInfo;
+  /** Task count per board column (statuses with zero tasks are present as 0). */
+  counts: Record<TaskStatus, number>;
+  /** Live sessions, working first, then needs_input. */
+  sessions: OverviewSession[];
+  /** Ready, agent-eligible tickets auto-pickup would drain. */
+  queueCount: number;
+  autoStart: boolean;
+  maxActive: number;
+  planningRunning: boolean;
+  /** Newest Task.updatedAt across the repo's tasks (absent when no tasks). */
+  lastActivityAt?: string;
+}
+
 /** One line in .orchestrator/logs/issue-{n}.jsonl and on the /api/tasks/[n]/logs SSE stream. */
 export interface LogEvent {
   ts: string;
