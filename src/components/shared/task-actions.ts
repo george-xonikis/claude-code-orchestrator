@@ -111,6 +111,39 @@ export function cancelPlanningPass(repoId: string): Promise<void> {
   return post(`/api/planning/cancel${repoQuery(repoId)}`);
 }
 
+/**
+ * Pass-level steering chat: shapes what the NEXT pass looks for. Chat turns are
+ * cheap (no repo scan) and never produce proposals — regenerate a pass for that.
+ */
+export async function getPlanningSteering(repoId: string): Promise<DiscussionMessage[]> {
+  const res = await fetch(`/api/planning/steering${repoQuery(repoId)}`);
+  if (!res.ok) throw new Error(`GET /api/planning/steering failed with ${res.status}`);
+  return ((await res.json()) as { messages: DiscussionMessage[] }).messages;
+}
+
+/** Send one steering turn; resolves with the full updated transcript. */
+export async function sendPlanningSteering(
+  repoId: string,
+  text: string
+): Promise<DiscussionMessage[]> {
+  const res = await fetch(`/api/planning/steering${repoQuery(repoId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `steering turn failed with ${res.status}`);
+  }
+  return ((await res.json()) as { messages: DiscussionMessage[] }).messages;
+}
+
+/** Clear the steering transcript so the next pass runs unsteered. */
+export async function clearPlanningSteering(repoId: string): Promise<void> {
+  const res = await fetch(`/api/planning/steering${repoQuery(repoId)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`clear steering failed with ${res.status}`);
+}
+
 /** Max focus topics a plan may be steered toward (mirrors the server constant). */
 export const MAX_PLANNING_TOPICS = 3;
 
@@ -131,6 +164,12 @@ export interface PlanningConfig {
   maxEffort: number;
   /** Free-text focus topics steering the plan (<= MAX_PLANNING_TOPICS). */
   topics: string[];
+  /** Agent (`.claude/agents/` name) filling the PE role; null = default persona. */
+  peAgent: string | null;
+  /** Agent filling the PM role; null = default persona. */
+  pmAgent: string | null;
+  /** Agent that maintains the repo's product brief; null = none. */
+  briefAgent: string | null;
 }
 
 /** Per-repo execution config — the auto-pickup loop + the pre-commit review gate. */
@@ -147,6 +186,10 @@ export interface ExecutionConfig {
   pollMinutes: number | null;
   /** Reviewer subagent `name`s an execution agent MUST run before it may commit; empty = no gate. */
   reviewerAgents: string[];
+  /** Model agent sessions run on; a ticket's own preferredModel overrides it. */
+  executionModel: string;
+  /** Issue numbers arranged by hand in the queue; they drain first, in this order. */
+  manualQueue: number[];
 }
 
 export async function getPlanningConfig(repoId: string): Promise<PlanningConfig> {

@@ -74,6 +74,14 @@ export async function POST(request: Request) {
       }
       patch.topics = body.topics as string[];
     }
+    for (const key of ['peAgent', 'pmAgent', 'briefAgent'] as const) {
+      if (key in body) {
+        if (body[key] !== null && typeof body[key] !== 'string') {
+          return badRequest(`${key} must be an agent name string or null`);
+        }
+        patch[key] = body[key] as string | null;
+      }
+    }
 
     await setPlanningConfig(repo, patch);
     return NextResponse.json(await getPlanningConfig(repo));

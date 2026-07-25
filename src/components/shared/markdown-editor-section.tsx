@@ -5,7 +5,13 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 /** "Edit" label + pill switch, matching the app's agent-instructions editor. */
-function EditToggle({ editing, onChange }: { editing: boolean; onChange: (v: boolean) => void }) {
+export function EditToggle({
+  editing,
+  onChange,
+}: {
+  editing: boolean;
+  onChange: (v: boolean) => void;
+}) {
   return (
     <label className="flex cursor-pointer items-center gap-2">
       <span className="text-xs font-medium text-muted-foreground">Edit</span>

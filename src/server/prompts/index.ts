@@ -19,6 +19,7 @@ export {
 } from './implementation-session';
 export { planningAgentPrompt } from './planning-agent';
 export { exclusionDigest } from './planning-exclusions';
+export { steeringBlock, steeringChatPrompt } from './planning-steering';
 export { synthesisPrompt, type ProposalShaping } from './planning-synthesis';
 export {
   discussionPrompt,

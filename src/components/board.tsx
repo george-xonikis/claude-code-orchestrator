@@ -15,6 +15,7 @@ import {
   stopAllTasks,
 } from '@/components/shared/task-actions';
 import { AddRepoModal } from '@/components/add-repo-modal';
+import { orderQueue } from '@/lib/queue-order';
 import { QueueModal } from '@/components/queue-modal';
 import { useRepo } from '@/components/shared/use-repo';
 import { useTasks } from '@/components/shared/use-tasks';
@@ -60,13 +61,23 @@ export function Board() {
   const [activeLabels, setActiveLabels] = useState<ReadonlySet<string>>(new Set());
   const activeSessions = countActiveSessions(tasks);
 
-  // The auto-pickup queue: ready, agent-eligible tickets in execution order.
+  // The auto-pickup queue: ready, agent-eligible tickets in execution order —
+  // the same orderQueue() the loop drains with, so this list is what actually runs.
   const queueOrder = config?.queueOrder ?? 'oldest';
-  const queue = tasks
-    .filter((task) => task.status === 'ready' && !isNonAgentTask(task))
-    .sort((a, b) =>
-      queueOrder === 'newest' ? b.issueNumber - a.issueNumber : a.issueNumber - b.issueNumber
-    );
+  const queue = orderQueue(
+    tasks.filter((task) => task.status === 'ready' && !isNonAgentTask(task)),
+    queueOrder,
+    config?.manualQueue ?? []
+  );
+
+  /** Persist a hand-arranged queue (issue numbers, in order). */
+  const saveQueueOrder = (issueNumbers: number[]) => {
+    if (!current) return;
+    setConfig((prev) => (prev ? { ...prev, manualQueue: issueNumbers } : prev)); // optimistic
+    setExecutionConfig(current.id, { manualQueue: issueNumbers })
+      .then(setConfig)
+      .catch(() => {});
+  };
 
   // Auto-pickup lives on this board; fetch the repo's config to reflect it.
   // Reset during render on repo change (derived-state pattern) so the effect only fetches.
@@ -286,6 +297,8 @@ export function Board() {
           queueOrder={queueOrder}
           tasksPerRun={config?.tasksPerRun ?? null}
           maxActive={config?.maxActive ?? 1}
+          isManuallyOrdered={(config?.manualQueue ?? []).length > 0}
+          onReorder={saveQueueOrder}
           onClose={() => setQueueOpen(false)}
         />
       )}

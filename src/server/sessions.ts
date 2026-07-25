@@ -11,6 +11,7 @@ import type {
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { DEFAULT_EXECUTION_MODEL } from '@/lib/models';
 import type { LogEvent, RepoInfo, Task } from '@/lib/types';
 import {
   ASK_USER_QUESTION_DESCRIPTION,
@@ -374,8 +375,12 @@ function makeCanUseTool(
 // SDK message → LogEvent mapping
 // ---------------------------------------------------------------------------
 
-/** Model for implementation sessions (planning personas run on Fable in planning.ts). */
-const EXECUTION_MODEL = 'claude-opus-4-8';
+/**
+ * Last-resort model for implementation sessions. Every real start path resolves
+ * it first (ticket override → repo's Execution setting, in loop.ts's claim()),
+ * so this only applies to a startSession call that passes none.
+ */
+const EXECUTION_MODEL = DEFAULT_EXECUTION_MODEL;
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const TEST_COMMAND_PATTERN =

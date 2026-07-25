@@ -1,4 +1,5 @@
 import type { RepoInfo, Task } from '@/lib/types';
+import { orderQueue } from '@/lib/queue-order';
 import { requireReviewerAgents } from './agents';
 import { getExecutionConfig, setExecutionConfig } from './execution';
 import * as github from './github';
@@ -184,7 +185,7 @@ async function claim(
     // Gate: the session's configured reviewer agents must exist before we start
     // (throws here → caught below → task failed + issue comment). Validating
     // before the worktree avoids creating a doomed one.
-    const { reviewerAgents } = await getExecutionConfig(repo);
+    const { reviewerAgents, executionModel } = await getExecutionConfig(repo);
     await requireReviewerAgents(repo, reviewerAgents);
     await github.setLabels(repo.path, issueNumber, ['agent-working']);
     const wt = await worktrees.createWorktree(repo.path, issueNumber);
@@ -204,7 +205,8 @@ async function claim(
       issueNumber,
       wt.path,
       wt.branch,
-      model,
+      // The ticket's own model wins; otherwise the repo's configured default.
+      model ?? executionModel,
       useWorkflow,
       reviewerAgents
     );
@@ -343,7 +345,13 @@ async function poll(repo: RepoInfo): Promise<void> {
  */
 async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
   if (!repo.htmlUrl) return;
-  const { autoStart: enabled, maxActive, queueOrder, tasksPerRun } = await getExecutionConfig(repo);
+  const {
+    autoStart: enabled,
+    maxActive,
+    queueOrder,
+    tasksPerRun,
+    manualQueue,
+  } = await getExecutionConfig(repo);
 
   // A fresh run (off -> on) resets the per-run task counter.
   if (enabled && !s.autoStartWas) s.executedThisRun = 0;
@@ -359,15 +367,15 @@ async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
   }
   if (s.active.size >= maxActive) return;
 
-  const queue = (await state.getTasks(repo.path))
-    .filter((task) => {
+  // Same ordering the board's queue shows — manual arrangement first, then the default.
+  const queue = orderQueue(
+    (await state.getTasks(repo.path)).filter((task) => {
       if (task.status !== 'ready' || s.active.has(task.issueNumber)) return false;
       return !(task.labels ?? []).some((label) => NON_AGENT_LABEL.test(label));
-    })
-    // Issue numbers are monotonic, so ascending = oldest first.
-    .sort((a, b) =>
-      queueOrder === 'newest' ? b.issueNumber - a.issueNumber : a.issueNumber - b.issueNumber
-    );
+    }),
+    queueOrder,
+    manualQueue
+  );
 
   for (const task of queue) {
     if (s.active.size >= maxActive || capReached()) break;
@@ -645,7 +653,10 @@ export async function saveTicketSettings(
   await state.upsertTask(repo.path, {
     issueNumber,
     ...(patch.title !== undefined ? { title: patch.title } : {}),
-    ...(patch.preferredModel !== undefined ? { preferredModel: patch.preferredModel } : {}),
+    // '' clears the override (upsertTask deletes undefined keys).
+    ...(patch.preferredModel !== undefined
+      ? { preferredModel: patch.preferredModel || undefined }
+      : {}),
     ...(patch.useWorkflow !== undefined ? { useWorkflow: patch.useWorkflow } : {}),
   });
 }

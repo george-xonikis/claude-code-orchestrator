@@ -40,7 +40,8 @@ export function synthesisPrompt(
   pmReport: string,
   exclusions: string,
   shaping: ProposalShaping,
-  planningMemory: string
+  planningMemory: string,
+  steering: string
 ): string {
   return [
     'You are the synthesis step of a planning meeting between a Principal',
@@ -55,6 +56,15 @@ export function synthesisPrompt(
     '- Drop anything that serves no stated goal priority.',
     `- Keep at most ${shaping.maxProposals} items, ranked by leverage.`,
     ...shapingConstraints(shaping),
+    ...(steering.trim()
+      ? [
+          "- The developer's direction below governs this pass: rank what they asked",
+          '  for first, and drop items they steered away from.',
+          '',
+          steering.trim(),
+          '',
+        ]
+      : []),
     ...(planningMemory.trim()
       ? [
           '- Honor the developer\'s prioritization guidance below — drop items it says',

@@ -3,9 +3,5 @@ export function formatModel(model: string): string {
   return model.replace(/^claude-/, '');
 }
 
-/** Models offered for implementation sessions (first = default). */
-export const MODEL_OPTIONS = [
-  { id: 'claude-opus-4-8', label: 'Opus' },
-  { id: 'claude-sonnet-5', label: 'Sonnet' },
-  { id: 'claude-fable-5', label: 'Fable' },
-] as const;
+/** Re-exported so existing importers keep resolving it from this module. */
+export { MODEL_OPTIONS } from '@/lib/models';

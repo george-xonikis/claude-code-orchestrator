@@ -1,14 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
 import {
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
   Loader2,
-  SlidersHorizontal,
   Trash2,
   X,
 } from 'lucide-react';
@@ -20,6 +18,7 @@ import type { PlanningLogLine, PlanningPass, PlanningProposal } from '@/lib/type
 import { ClaudeLogo } from '@/components/shared/claude-logo';
 import { EFFORT_METER, GradeMeter, IMPACT_METER } from '@/components/shared/grade-meter';
 import { LabelChip } from '@/components/shared/label-chip';
+import { PlanningSteeringChat } from '@/components/planning-steering-chat';
 import {
   cancelPlanningPass,
   clearProposalDiscussion,
@@ -161,7 +160,7 @@ function ProposalCard({
             <button
               type="button"
               onClick={onDiscuss}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#D97757]/40 bg-[#D97757]/10 px-4 text-sm font-semibold text-foreground opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:bg-[#D97757]/20"
+              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[#D97757]/30 bg-[#D97757]/[0.08] pl-2 pr-2.5 text-xs font-medium text-foreground opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:border-[#D97757]/50 hover:bg-[#D97757]/15"
             >
               <ClaudeLogo className="h-4 w-4 text-[#D97757]" />
               Claude
@@ -257,6 +256,39 @@ function PassLog({ logs, running }: { logs: PlanningLogLine[]; running: boolean 
   );
 }
 
+type ProposalStatus = PlanningProposal['status'];
+
+const STATUS_FILTER_STORAGE_KEY = 'orchestrator-planning-hidden-statuses';
+
+const STATUS_FILTERS: { status: ProposalStatus; label: string; dot: string }[] = [
+  { status: 'pending', label: 'Pending', dot: 'bg-primary' },
+  { status: 'filed', label: 'Filed', dot: 'bg-info' },
+  { status: 'dismissed', label: 'Dismissed', dot: 'bg-muted-foreground' },
+];
+
+/**
+ * Statuses hidden from the board. Filed and dismissed proposals are already
+ * decided, so they start hidden and the board opens on what still needs a call;
+ * the choice persists (same lazy-read-at-init pattern as the repo selection).
+ */
+function readHiddenStatuses(): ReadonlySet<ProposalStatus> {
+  const fallback: ReadonlySet<ProposalStatus> = new Set<ProposalStatus>(['filed', 'dismissed']);
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = localStorage.getItem(STATUS_FILTER_STORAGE_KEY);
+    if (raw === null) return fallback;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return fallback;
+    return new Set(
+      parsed.filter((value): value is ProposalStatus =>
+        STATUS_FILTERS.some((filter) => filter.status === value)
+      )
+    );
+  } catch {
+    return fallback;
+  }
+}
+
 export function PlanningPage() {
   const { current, loaded: reposLoaded } = useRepo();
   const repoId = current?.id ?? null;
@@ -270,6 +302,8 @@ export function PlanningPage() {
   const [dismissing, setDismissing] = useState<{ passId: string; ids: string[] } | null>(null);
   const [dismissReason, setDismissReason] = useState('');
   const [config, setConfig] = useState<PlanningConfig | null>(null);
+  const [hidden, setHidden] = useState<ReadonlySet<ProposalStatus>>(readHiddenStatuses);
+  const [steeringOpen, setSteeringOpen] = useState(false);
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
     null
   );
@@ -296,6 +330,7 @@ export function PlanningPage() {
     setPasses([]);
     setSelected(new Set());
     setDiscussing(null);
+    setSteeringOpen(false);
     setConfig(null);
     setLoaded(false);
   }
@@ -326,6 +361,36 @@ export function PlanningPage() {
 
   const selectedIdsIn = (pass: PlanningPass) =>
     pass.proposals.filter((p) => selected.has(`${pass.id}:${p.id}`)).map((p) => p.id);
+
+  const toggleStatus = (status: ProposalStatus) => {
+    const next = new Set(hidden);
+    if (next.has(status)) {
+      next.delete(status);
+    } else {
+      next.add(status);
+      // Only pending proposals are selectable, so hiding them would otherwise
+      // leave an invisible selection armed for the next Create/Dismiss.
+      if (status === 'pending') setSelected(new Set());
+    }
+    setHidden(next);
+    try {
+      localStorage.setItem(STATUS_FILTER_STORAGE_KEY, JSON.stringify([...next]));
+    } catch {
+      // localStorage unavailable — the filter still applies for this session.
+    }
+  };
+
+  // Badge counts span every pass, so they stay a full picture of the board even
+  // when the passes themselves are filtered down to nothing.
+  const statusCounts = passes.reduce(
+    (acc, pass) => {
+      for (const proposal of pass.proposals) acc[proposal.status] += 1;
+      return acc;
+    },
+    { pending: 0, filed: 0, dismissed: 0 } as Record<ProposalStatus, number>
+  );
+  const totalProposals = statusCounts.pending + statusCounts.filed + statusCounts.dismissed;
+  const hiddenCount = [...hidden].reduce((sum, status) => sum + statusCounts[status], 0);
 
   // Agents a Plan run uses come from the config (default both until it loads);
   // passing none lets the server fall back to the configured roles.
@@ -424,15 +489,23 @@ export function PlanningPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-sm font-bold">Planning</h1>
         <div className="flex shrink-0 items-center gap-2">
-          <Link
-            href="/settings"
-            aria-label="Planning settings"
-            title="Planning settings"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-2.5 text-xs font-medium hover:bg-background-hover"
+          <button
+            type="button"
+            onClick={() => {
+              setSteeringOpen((v) => !v);
+              setDiscussing(null); // one drawer at a time
+            }}
+            aria-pressed={steeringOpen}
+            title="Steer the next plan with Claude"
+            className={`inline-flex h-8 items-center gap-1.5 rounded-md border pl-2 pr-3 text-xs font-medium transition-colors ${
+              steeringOpen
+                ? 'border-[#D97757]/50 bg-[#D97757]/15'
+                : 'border-[#D97757]/30 bg-[#D97757]/[0.08] hover:border-[#D97757]/50 hover:bg-[#D97757]/15'
+            }`}
           >
-            <SlidersHorizontal className="h-3.5 w-3.5" />
-            Config
-          </Link>
+            <ClaudeLogo className="h-[18px] w-[18px] text-[#D97757]" />
+            Claude
+          </button>
           <button
             type="button"
             disabled={busy || running || !canPlan}
@@ -477,15 +550,67 @@ export function PlanningPage() {
         <p className="text-sm text-muted-foreground">No planning passes yet — run the first one.</p>
       )}
 
+      {totalProposals > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {STATUS_FILTERS.map(({ status, label, dot }) => {
+            const showing = !hidden.has(status);
+            return (
+              <button
+                key={status}
+                type="button"
+                onClick={() => toggleStatus(status)}
+                aria-pressed={showing}
+                title={`${showing ? 'Hide' : 'Show'} ${label.toLowerCase()} proposals`}
+                className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors ${
+                  showing
+                    ? 'border-border bg-elevated-secondary text-foreground hover:bg-background-hover'
+                    : 'border-dashed border-border text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${dot} ${showing ? '' : 'opacity-40'}`} />
+                {label}
+                <span
+                  className={`rounded-full px-1.5 py-px text-[10px] tabular-nums text-muted-foreground ${
+                    showing ? 'bg-background-hover' : ''
+                  }`}
+                >
+                  {statusCounts[status]}
+                </span>
+              </button>
+            );
+          })}
+          {hiddenCount > 0 && (
+            <span className="text-xs text-muted-foreground">
+              {hiddenCount} hidden
+            </span>
+          )}
+        </div>
+      )}
+
+      {totalProposals > 0 && hiddenCount === totalProposals && (
+        <p className="text-sm text-muted-foreground">
+          Every proposal is hidden by the filters above.
+        </p>
+      )}
+
       {passes.map((pass) => {
-        const pendingCount = pass.proposals.filter((p) => p.status === 'pending').length;
+        const visible = pass.proposals.filter((p) => !hidden.has(p.status));
+        // A finished pass whose every proposal is filtered out drops off the
+        // board entirely — the badge counts above say what's being held back.
+        if (pass.status === 'complete' && pass.proposals.length > 0 && visible.length === 0) {
+          return null;
+        }
+        const pendingCount = visible.filter((p) => p.status === 'pending').length;
         const selectedCount = selectedIdsIn(pass).length;
         return (
           <section key={pass.id}>
             <div className="mb-2 flex items-center justify-between">
               <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 {new Date(pass.startedAt).toLocaleString()} · {pass.status}
-                {pass.status === 'complete' && ` · ${pass.proposals.length} proposals`}
+                {pass.status === 'complete' &&
+                  (visible.length === pass.proposals.length
+                    ? ` · ${pass.proposals.length} proposals`
+                    : ` · ${visible.length} of ${pass.proposals.length} proposals`)}
               </span>
               {pendingCount > 0 && (
                 <div className="flex gap-2">
@@ -563,13 +688,16 @@ export function PlanningPage() {
               ))}
             <PassLog logs={pass.logs ?? []} running={pass.status === 'running'} />
             <div className="flex flex-col gap-2">
-              {pass.proposals.map((proposal) => (
+              {visible.map((proposal) => (
                 <ProposalCard
                   key={proposal.id}
                   proposal={proposal}
                   selected={selected.has(`${pass.id}:${proposal.id}`)}
                   onToggle={() => toggle(pass.id, proposal.id)}
-                  onDiscuss={() => setDiscussing({ passId: pass.id, proposalId: proposal.id })}
+                  onDiscuss={() => {
+                    setDiscussing({ passId: pass.id, proposalId: proposal.id });
+                    setSteeringOpen(false); // one drawer at a time
+                  }}
                 />
               ))}
             </div>
@@ -590,6 +718,15 @@ export function PlanningPage() {
           proposalId={discussing.proposalId}
           onProposalChanged={refresh}
           onClose={() => setDiscussing(null)}
+        />
+      )}
+      {repoId && steeringOpen && !discussing && (
+        <PlanningSteeringChat
+          repoId={repoId}
+          onPlan={handleStart}
+          planning={running}
+          canPlan={canPlan && !busy}
+          onClose={() => setSteeringOpen(false)}
         />
       )}
     </div>

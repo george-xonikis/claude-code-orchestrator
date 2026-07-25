@@ -58,11 +58,13 @@ export async function POST(
     if (body.body !== undefined && typeof body.body !== 'string') {
       return badRequest('body must be a string');
     }
+    // '' clears the override so the ticket falls back to the repo's model.
     if (
       body.preferredModel !== undefined &&
-      (typeof body.preferredModel !== 'string' || !/^claude-[a-z0-9.-]+$/.test(body.preferredModel))
+      (typeof body.preferredModel !== 'string' ||
+        (body.preferredModel !== '' && !/^claude-[a-z0-9.-]+$/.test(body.preferredModel)))
     ) {
-      return badRequest('preferredModel must be a claude-* model id');
+      return badRequest('preferredModel must be a claude-* model id, or "" to clear it');
     }
     if (body.useWorkflow !== undefined && typeof body.useWorkflow !== 'boolean') {
       return badRequest('useWorkflow must be a boolean');

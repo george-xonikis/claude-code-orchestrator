@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Bot, ClipboardList, Info, SlidersHorizontal, Target, X } from 'lucide-react';
+import { Bot, ClipboardList, Info, SlidersHorizontal, Target, Users, X } from 'lucide-react';
 
+import { MODEL_OPTIONS } from '@/lib/models';
 import type { AgentMeta } from '@/lib/types';
 import { EFFORT_METER, GradeMeterInput, IMPACT_METER } from '@/components/shared/grade-meter';
 import { MarkdownEditorSection } from '@/components/shared/markdown-editor-section';
@@ -42,16 +43,22 @@ const SELECT_CLASS =
 
 const TABS = [
   {
+    value: 'agents',
+    label: 'Agents',
+    Icon: Users,
+    description: "Assign this repo's agents to each role: planning, review, and the product brief. Pick from this repo's agents (under .claude/agents/).",
+  },
+  {
     value: 'planning',
     label: 'Planning',
     Icon: ClipboardList,
-    description: 'How planning passes run — which agents, when, and what they prioritize.',
+    description: 'How planning passes run — when they run and what they prioritize.',
   },
   {
     value: 'execution',
     label: 'Execution',
     Icon: Bot,
-    description: 'How agent sessions run — auto-pickup, concurrency, and the pre-commit review gate.',
+    description: 'How agent sessions run — auto-pickup and concurrency.',
   },
   {
     value: 'goal',
@@ -113,6 +120,36 @@ function NumberSelect({
   );
 }
 
+/** Single-agent picker from the repo's .claude/agents/. Shows a "missing" option if the saved name is gone. */
+function AgentSelect({
+  value,
+  agents,
+  onChange,
+  defaultLabel,
+}: {
+  value: string | null;
+  agents: AgentMeta[];
+  onChange: (value: string | null) => void;
+  defaultLabel: string;
+}) {
+  const missing = value !== null && !agents.some((a) => a.name === value);
+  return (
+    <select
+      value={value ?? ''}
+      onChange={(e) => onChange(e.target.value || null)}
+      className={SELECT_CLASS}
+    >
+      <option value="">{defaultLabel}</option>
+      {agents.map((a) => (
+        <option key={a.name} value={a.name}>
+          {a.name}
+        </option>
+      ))}
+      {missing && <option value={value ?? ''}>{value} (missing)</option>}
+    </select>
+  );
+}
+
 function Section({
   title,
   description,
@@ -144,7 +181,7 @@ export function SettingsPage() {
   const [memory, setMemory] = useState('');
   const [planningMemory, setPlanningMemory] = useState('');
   const [topicDraft, setTopicDraft] = useState('');
-  const [tab, setTab] = useState<Tab>('planning');
+  const [tab, setTab] = useState<Tab>('agents');
 
   // Reset during render when the repo changes (derived-state pattern).
   const [loadedRepoId, setLoadedRepoId] = useState(repoId);
@@ -234,7 +271,10 @@ export function SettingsPage() {
   }
 
   // Config-backed tabs need their config loaded; Goal/Memory only need their own text.
-  const configLoading = (tab === 'planning' && !cfg) || (tab === 'execution' && !ecfg);
+  const configLoading =
+    (tab === 'planning' && !cfg) ||
+    (tab === 'execution' && !ecfg) ||
+    (tab === 'agents' && (!cfg || !ecfg));
 
   const activeTab = TABS.find((t) => t.value === tab);
 
@@ -284,8 +324,8 @@ export function SettingsPage() {
           {tab === 'planning' && cfg && (
             <>
               <Section
-                title="Agents"
-                description="Which agents planning passes run — used by both scheduled auto-runs and manual runs on the Planning page."
+                title="Run scope"
+                description="Which roles a planning pass runs — used by scheduled auto-runs and manual runs on the Planning page. Who fills each role is set in the Agents tab."
               >
                 {(['engineer', 'pm'] as PlanningRole[]).map((role) => (
                   <Row key={role} label={AGENT_LABEL[role]}>
@@ -426,8 +466,145 @@ export function SettingsPage() {
             </>
           )}
 
+          {tab === 'agents' && cfg && ecfg && (
+            <>
+              <Section
+                title="Planning agents"
+                description={
+                  <>
+                    Who fills each planning role.
+                  </>
+                }
+              >
+                <Row label="Principal Engineer (PE)">
+                  <AgentSelect
+                    value={cfg.peAgent}
+                    agents={agents}
+                    onChange={(v) => patch({ peAgent: v })}
+                    defaultLabel="Default (principal-engineer)"
+                  />
+                </Row>
+                <Row label="Product Manager (PM)">
+                  <AgentSelect
+                    value={cfg.pmAgent}
+                    agents={agents}
+                    onChange={(v) => patch({ pmAgent: v })}
+                    defaultLabel="Default (product-manager)"
+                  />
+                </Row>
+              </Section>
+
+              <Section
+                title="Reviewers"
+                description={
+                  <>
+                    Reviewers an execution agent{' '}
+                    <span className="font-medium">must run before it may commit</span>.
+                  </>
+                }
+              >
+                {ecfg.reviewerAgents.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {ecfg.reviewerAgents.map((name) => {
+                      const missing = !agents.some((a) => a.name === name);
+                      return (
+                        <span
+                          key={name}
+                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
+                            missing
+                              ? 'bg-destructive/10 text-destructive'
+                              : 'bg-secondary text-secondary-foreground'
+                          }`}
+                        >
+                          {name}
+                          <button
+                            type="button"
+                            onClick={() => toggleReviewer(name)}
+                            aria-label={`Remove ${name}`}
+                            className="opacity-70 hover:opacity-100"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+                {agents.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No agents found in <code>.claude/agents/</code> for this repo.
+                  </p>
+                ) : (
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) toggleReviewer(e.target.value);
+                    }}
+                    className={SELECT_CLASS}
+                  >
+                    <option value="">Add a reviewer…</option>
+                    {agents
+                      .filter((a) => !ecfg.reviewerAgents.includes(a.name))
+                      .map((a) => (
+                        <option key={a.name} value={a.name}>
+                          {a.name}
+                        </option>
+                      ))}
+                  </select>
+                )}
+                {ecfg.reviewerAgents.length === 0 ? (
+                  <p className="text-xs text-warning">
+                    ⚠️ No reviewer selected — commit review is{' '}
+                    <span className="font-medium">not enforced</span>.
+                  </p>
+                ) : (
+                  ecfg.reviewerAgents
+                    .filter((name) => !agents.some((a) => a.name === name))
+                    .map((name) => (
+                      <p key={name} className="text-xs text-destructive">
+                        ⚠️ <span className="font-medium">{name}</span> — missing from{' '}
+                        <code>.claude/agents/</code>; will block sessions until added or deselected.
+                      </p>
+                    ))
+                )}
+              </Section>
+
+              <Section
+                title="Product brief"
+                description="The agent that keeps this repo's product brief up to date"
+              >
+                <Row label="Brief maintainer">
+                  <AgentSelect
+                    value={cfg.briefAgent}
+                    agents={agents}
+                    onChange={(v) => patch({ briefAgent: v })}
+                    defaultLabel="None"
+                  />
+                </Row>
+              </Section>
+            </>
+          )}
+
           {tab === 'execution' && ecfg && (
             <>
+            <Section
+              title="Model"
+              description="The model agent sessions run on. A ticket can override this from its own settings."
+            >
+              <Row label="Execution model">
+                <select
+                  value={ecfg.executionModel}
+                  onChange={(e) => patchExec({ executionModel: e.target.value })}
+                  className={SELECT_CLASS}
+                >
+                  {MODEL_OPTIONS.map(({ id, label }) => (
+                    <option key={id} value={id}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </Row>
+            </Section>
             <Section
               title="Agentic mode (loops)"
               description={
@@ -503,82 +680,6 @@ export function SettingsPage() {
                 </select>
               </Row>
             </Section>
-
-            <Section
-              title="Pre-commit code review"
-              description={
-                <>
-                  Reviewers an execution agent{' '}
-                  <span className="font-medium">must run before it may commit</span>. Pick from this
-                  repo&apos;s agents (under <code>.claude/agents/</code>).
-                </>
-              }
-            >
-              {ecfg.reviewerAgents.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {ecfg.reviewerAgents.map((name) => {
-                    const missing = !agents.some((a) => a.name === name);
-                    return (
-                      <span
-                        key={name}
-                        className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
-                          missing
-                            ? 'bg-destructive/10 text-destructive'
-                            : 'bg-secondary text-secondary-foreground'
-                        }`}
-                      >
-                        {name}
-                        <button
-                          type="button"
-                          onClick={() => toggleReviewer(name)}
-                          aria-label={`Remove ${name}`}
-                          className="opacity-70 hover:opacity-100"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    );
-                  })}
-                </div>
-              )}
-              {agents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No agents found in <code>.claude/agents/</code> for this repo.
-                </p>
-              ) : (
-                <select
-                  value=""
-                  onChange={(e) => {
-                    if (e.target.value) toggleReviewer(e.target.value);
-                  }}
-                  className={SELECT_CLASS}
-                >
-                  <option value="">Add a reviewer…</option>
-                  {agents
-                    .filter((a) => !ecfg.reviewerAgents.includes(a.name))
-                    .map((a) => (
-                      <option key={a.name} value={a.name}>
-                        {a.name}
-                      </option>
-                    ))}
-                </select>
-              )}
-              {ecfg.reviewerAgents.length === 0 ? (
-                <p className="text-xs text-warning">
-                  ⚠️ No reviewer selected — commit review is <span className="font-medium">not enforced</span>.
-                </p>
-              ) : (
-                ecfg.reviewerAgents
-                  .filter((name) => !agents.some((a) => a.name === name))
-                  .map((name) => (
-                    <p key={name} className="text-xs text-destructive">
-                      ⚠️ <span className="font-medium">{name}</span> — missing from{' '}
-                      <code>.claude/agents/</code>; will block sessions until added or deselected.
-                    </p>
-                  ))
-              )}
-            </Section>
-
             <MarkdownEditorSection
               title="Memory"
               description="Reusable codebase lessons injected into every execution session. Agents append here via save_memory (stamped with the issue number) — curate freely, delete anything wrong. Stored in .orchestrator/memory.md."

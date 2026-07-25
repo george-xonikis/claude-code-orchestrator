@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
+import { isKnownModel, MODEL_OPTIONS } from '@/lib/models';
 import { resolveRepo } from '@/lib/repo-params';
 import { type ExecutionConfig, getExecutionConfig, setExecutionConfig } from '@/server/execution';
 
@@ -54,11 +55,28 @@ export async function POST(request: Request) {
         patch[key] = body[key] as number | null;
       }
     }
+    if ('manualQueue' in body) {
+      if (
+        !Array.isArray(body.manualQueue) ||
+        !body.manualQueue.every((n) => typeof n === 'number' && Number.isInteger(n))
+      ) {
+        return badRequest('manualQueue must be an array of issue numbers');
+      }
+      patch.manualQueue = body.manualQueue as number[];
+    }
     if ('reviewerAgents' in body) {
       if (!Array.isArray(body.reviewerAgents) || !body.reviewerAgents.every((a) => typeof a === 'string')) {
         return badRequest('reviewerAgents must be an array of strings');
       }
       patch.reviewerAgents = body.reviewerAgents as string[];
+    }
+    if ('executionModel' in body) {
+      if (!isKnownModel(body.executionModel)) {
+        return badRequest(
+          `executionModel must be one of: ${MODEL_OPTIONS.map((m) => m.id).join(', ')}`
+        );
+      }
+      patch.executionModel = body.executionModel;
     }
 
     return NextResponse.json(await setExecutionConfig(repo, patch));

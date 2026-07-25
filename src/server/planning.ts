@@ -4,6 +4,7 @@ import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk'
 import type { CanUseTool, McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { PlanningLogLine, PlanningPass, PlanningProposal, RepoInfo } from '@/lib/types';
+import { listRepoAgents } from './agents';
 import { createIssue } from './github';
 import {
   CREATE_PROPOSAL_TOOL_DESCRIPTION,
@@ -12,6 +13,8 @@ import {
   exclusionDigest,
   planningAgentPrompt,
   type ProposalShaping,
+  steeringBlock,
+  steeringChatPrompt,
   synthesisPrompt,
   UPDATE_PROPOSAL_TOOL_DESCRIPTION,
 } from './prompts';
@@ -100,10 +103,35 @@ export interface PlanningConfig {
   maxEffort: number;
   /** Free-text focus topics to steer the plan toward (<= MAX_PLANNING_TOPICS). */
   topics: string[];
+  /** Agent (`.claude/agents/` name) filling the PE role; null = default principal-engineer.md. */
+  peAgent: string | null;
+  /** Agent name filling the PM role; null = default product-manager.md. */
+  pmAgent: string | null;
+  /** Agent name that maintains the repo's product brief; null = none. */
+  briefAgent: string | null;
 }
 
 interface PlanningStore extends PlanningConfig {
   passes: PlanningPass[];
+  /** Pass-level steering chat — the developer's direction for the next pass. */
+  steering: DiscussionMessage[];
+}
+
+/** Keep the steering transcript bounded so it can't grow the prompt without limit. */
+const MAX_STEERING_MESSAGES = 40;
+
+function sanitizeSteering(value: unknown): DiscussionMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (m): m is DiscussionMessage =>
+        !!m &&
+        typeof m === 'object' &&
+        ((m as DiscussionMessage).role === 'user' ||
+          (m as DiscussionMessage).role === 'assistant') &&
+        typeof (m as DiscussionMessage).text === 'string'
+    )
+    .slice(-MAX_STEERING_MESSAGES);
 }
 
 /** Config defaults — automation off, mid impact/effort thresholds, no topic focus. */
@@ -116,7 +144,17 @@ const CONFIG_DEFAULTS: PlanningConfig = {
   minImpact: 3,
   maxEffort: 3,
   topics: [],
+  peAgent: null,
+  pmAgent: null,
+  briefAgent: null,
 };
+
+/** Trim an agent-name assignment; empty -> null. Existence is checked at pass start. */
+function sanitizeAgentName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().slice(0, 100);
+  return trimmed || null;
+}
 
 const clampInt = (value: unknown, min: number, max: number, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value)
@@ -156,6 +194,7 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       /** Legacy single master toggle — migrated to autoFile (autoStart now lives in execution config). */
       autonomous?: boolean;
       passes?: PlanningPass[];
+      steering?: unknown;
     };
     const legacyAutonomous = parsed.autonomous ?? false;
     return {
@@ -167,10 +206,14 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       minImpact: clampInt(parsed.minImpact, 1, 5, CONFIG_DEFAULTS.minImpact),
       maxEffort: clampInt(parsed.maxEffort, 1, 5, CONFIG_DEFAULTS.maxEffort),
       topics: sanitizeTopics(parsed.topics),
+      peAgent: sanitizeAgentName(parsed.peAgent),
+      pmAgent: sanitizeAgentName(parsed.pmAgent),
+      briefAgent: sanitizeAgentName(parsed.briefAgent),
       passes: parsed.passes ?? [],
+      steering: sanitizeSteering(parsed.steering),
     };
   } catch {
-    return { ...CONFIG_DEFAULTS, passes: [] };
+    return { ...CONFIG_DEFAULTS, passes: [], steering: [] };
   }
 }
 
@@ -228,8 +271,9 @@ export async function ensurePlanningScheduler(repo: RepoInfo): Promise<void> {
 
 /** Per-repo planning config, with defaults filled in. */
 export async function getPlanningConfig(repo: RepoInfo): Promise<PlanningConfig> {
-  const { passes: _passes, ...config } = await loadStore(repo.path);
+  const { passes: _passes, steering: _steering, ...config } = await loadStore(repo.path);
   void _passes;
+  void _steering;
   return config;
 }
 
@@ -252,6 +296,9 @@ export async function setPlanningConfig(
   if (patch.minImpact !== undefined) store.minImpact = clampInt(patch.minImpact, 1, 5, store.minImpact);
   if (patch.maxEffort !== undefined) store.maxEffort = clampInt(patch.maxEffort, 1, 5, store.maxEffort);
   if (patch.topics !== undefined) store.topics = sanitizeTopics(patch.topics);
+  if (patch.peAgent !== undefined) store.peAgent = sanitizeAgentName(patch.peAgent);
+  if (patch.pmAgent !== undefined) store.pmAgent = sanitizeAgentName(patch.pmAgent);
+  if (patch.briefAgent !== undefined) store.briefAgent = sanitizeAgentName(patch.briefAgent);
 
   await saveStore(repo.path, store);
   if (intervalChanged) await ensurePlanningScheduler(repo);
@@ -298,7 +345,7 @@ const readOnlyCanUseTool: CanUseTool = async (toolName, input) => {
 
 /** Planning runs on Fable; when its usage limit is hit, fall back to Opus. */
 const PLANNING_MODEL = 'claude-fable-5';
-const PLANNING_FALLBACK_MODEL = 'claude-opus-4-8';
+const PLANNING_FALLBACK_MODEL = 'claude-opus-5';
 
 function isUsageLimitError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
@@ -389,6 +436,7 @@ async function runPlanningAgent(
   exclusions: string,
   shaping: ProposalShaping,
   planningMemory: string,
+  steering: string,
   onEvent?: (event: LogEvent) => void,
   abortController?: AbortController
 ): Promise<string> {
@@ -396,37 +444,56 @@ async function runPlanningAgent(
   const body = definition.replace(/^---[\s\S]*?---\s*/, '');
   return runPlanningQuery(
     repoPath,
-    planningAgentPrompt(body, exclusions, shaping, planningMemory),
+    planningAgentPrompt(body, exclusions, shaping, planningMemory, steering),
     abortController ? { abortController } : undefined,
     onEvent
   );
 }
 
 /**
- * The persona files for the requested roles must exist before a pass can run.
- * Throws a clear error naming any missing files (surfaced on the Planning page).
- * Returns absolute paths for both roles (only the requested ones are validated).
+ * Resolve the persona definition file for a role. Uses the agent assigned in
+ * config (Settings → Agents) if set — looked up by its `.claude/agents/` name —
+ * otherwise the built-in default (principal-engineer.md / product-manager.md).
+ * Returns the absolute path and a human label for error messages.
+ */
+async function resolvePersonaFile(
+  repo: RepoInfo,
+  role: PlanningRole,
+  config: PlanningConfig
+): Promise<{ path: string; label: string }> {
+  const assigned = role === 'engineer' ? config.peAgent : config.pmAgent;
+  if (assigned) {
+    const agent = (await listRepoAgents(repo.path)).find(
+      (a) => a.name.toLowerCase() === assigned.toLowerCase()
+    );
+    const file = agent ? agent.file : `${assigned}.md`;
+    return { path: path.join(repo.path, '.claude', 'agents', file), label: `agent "${assigned}"` };
+  }
+  return { path: path.join(repo.path, PERSONA_FILES[role]), label: PERSONA_FILES[role] };
+}
+
+/**
+ * Resolve + validate the persona files for the requested roles before a pass
+ * can run. Throws naming any missing ones (surfaced on the Planning page).
  */
 async function requirePersonaFiles(
   repo: RepoInfo,
-  roles: PlanningRole[]
+  roles: PlanningRole[],
+  config: PlanningConfig
 ): Promise<Record<PlanningRole, string>> {
-  const paths: Record<PlanningRole, string> = {
-    engineer: path.join(repo.path, PERSONA_FILES.engineer),
-    pm: path.join(repo.path, PERSONA_FILES.pm),
-  };
+  const paths = {} as Record<PlanningRole, string>;
   const missing: string[] = [];
   for (const role of roles) {
+    const { path: p, label } = await resolvePersonaFile(repo, role, config);
+    paths[role] = p;
     try {
-      await fsp.access(paths[role]);
+      await fsp.access(p);
     } catch {
-      missing.push(PERSONA_FILES[role]);
+      missing.push(label);
     }
   }
   if (missing.length > 0) {
-    throw new Error(
-      `Planning personas missing in ${repo.name}: create ${missing.join(' and ')}`
-    );
+    throw new Error(`Planning personas missing in ${repo.name}: ${missing.join(' and ')}`);
   }
   return paths;
 }
@@ -516,9 +583,11 @@ export async function startPlanningPass(
     maxEffort: store.maxEffort,
     maxProposals: store.maxProposals,
   };
-  const personas = await requirePersonaFiles(repo, roles);
+  const personas = await requirePersonaFiles(repo, roles, store);
   // Prioritization guidance the personas learn from (dismiss reasons + hand edits).
   const { planningMemory } = await readSettings(repo.path);
+  // The developer's steering chat, if any — direction for THIS pass.
+  const steering = steeringBlock(store.steering);
   g.running = true;
   g.cancelled = false;
   const abort = new AbortController();
@@ -575,6 +644,7 @@ export async function startPlanningPass(
             exclusions,
             shaping,
             planningMemory,
+            steering,
             record(role),
             abort
           );
@@ -583,7 +653,14 @@ export async function startPlanningPass(
       const proposals = parseProposals(
         await runPlanningQuery(
           repo.path,
-          synthesisPrompt(reports.engineer, reports.pm, exclusions, shaping, planningMemory),
+          synthesisPrompt(
+            reports.engineer,
+            reports.pm,
+            exclusions,
+            shaping,
+            planningMemory,
+            steering
+          ),
           { abortController: abort },
           record('synthesis')
         )
@@ -704,6 +781,51 @@ export async function dismissProposals(
       `Rejected "${dismissedTitles.join('", "')}": ${note}`
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Steering chat (the pass-level chat on the planning page)
+//
+// A cheap conversational turn that shapes WHAT the next pass looks for. It
+// never writes proposals — those come only from a regenerated pass, which
+// injects this transcript into the PE/PM and synthesis prompts.
+// ---------------------------------------------------------------------------
+
+/** The stored steering transcript for a repo. */
+export async function getPlanningSteering(repo: RepoInfo): Promise<DiscussionMessage[]> {
+  return (await loadStore(repo.path)).steering;
+}
+
+/** Replace the steering transcript (used to clear it). */
+export async function setPlanningSteering(
+  repo: RepoInfo,
+  messages: DiscussionMessage[]
+): Promise<DiscussionMessage[]> {
+  const store = await loadStore(repo.path);
+  store.steering = sanitizeSteering(messages);
+  await saveStore(repo.path, store);
+  return store.steering;
+}
+
+/**
+ * One steering turn: append the developer's message, get a reply, persist both.
+ * Returns the full transcript so the client stays in sync.
+ */
+export async function sendPlanningSteering(
+  repo: RepoInfo,
+  text: string
+): Promise<DiscussionMessage[]> {
+  const store = await loadStore(repo.path);
+  const { goal } = await readSettings(repo.path);
+  // Titles of what's already on the board, so it doesn't re-suggest them.
+  const currentProposals = store.passes[0]?.proposals.map((p) => p.title) ?? [];
+
+  const next: DiscussionMessage[] = [...store.steering, { role: 'user', text }];
+  const reply = await runPlanningQuery(
+    repo.path,
+    steeringChatPrompt(goal, currentProposals, next)
+  );
+  return setPlanningSteering(repo, [...next, { role: 'assistant', text: reply }]);
 }
 
 // ---------------------------------------------------------------------------

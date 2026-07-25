@@ -1,5 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { DEFAULT_EXECUTION_MODEL, isKnownModel } from '@/lib/models';
+import { sanitizeManualQueue } from '@/lib/queue-order';
 import type { RepoInfo } from '@/lib/types';
 
 /**
@@ -24,6 +26,10 @@ export interface ExecutionConfig {
   pollMinutes: number | null;
   /** Reviewer subagent `name`s an execution agent MUST run before it may commit; empty = no gate. */
   reviewerAgents: string[];
+  /** Model agent sessions run on; a ticket's own preferredModel overrides it. */
+  executionModel: string;
+  /** Issue numbers the developer arranged by hand; they drain first, in this order. */
+  manualQueue: number[];
 }
 
 const DEFAULTS: ExecutionConfig = {
@@ -33,6 +39,8 @@ const DEFAULTS: ExecutionConfig = {
   tasksPerRun: null,
   pollMinutes: 2,
   reviewerAgents: [],
+  executionModel: DEFAULT_EXECUTION_MODEL,
+  manualQueue: [],
 };
 
 function executionFile(repoPath: string): string {
@@ -88,6 +96,12 @@ function normalize(src: LegacyFields): ExecutionConfig {
     pollMinutes:
       src.pollMinutes === undefined ? 2 : src.pollMinutes === null ? null : clampInt(src.pollMinutes, 1, 60, 2),
     reviewerAgents: sanitizeReviewerAgents(src.reviewerAgents),
+    // Unknown/removed model ids fall back to the default rather than failing at
+    // session start.
+    executionModel: isKnownModel(src.executionModel)
+      ? src.executionModel
+      : DEFAULTS.executionModel,
+    manualQueue: sanitizeManualQueue(src.manualQueue),
   };
 }
 
@@ -131,6 +145,9 @@ export async function setExecutionConfig(
       patch.pollMinutes === null ? null : clampInt(patch.pollMinutes, 1, 60, store.pollMinutes ?? 2);
   if (patch.reviewerAgents !== undefined)
     store.reviewerAgents = sanitizeReviewerAgents(patch.reviewerAgents);
+  if (patch.executionModel !== undefined && isKnownModel(patch.executionModel))
+    store.executionModel = patch.executionModel;
+  if (patch.manualQueue !== undefined) store.manualQueue = sanitizeManualQueue(patch.manualQueue);
   await saveStore(repo.path, store);
   return store;
 }

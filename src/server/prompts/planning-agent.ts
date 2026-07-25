@@ -47,7 +47,8 @@ export function planningAgentPrompt(
   personaBody: string,
   exclusions: string,
   shaping: ProposalShaping,
-  planningMemory: string
+  planningMemory: string,
+  steering: string
 ): string {
   const preamble = [
     'Run a planning pass NOW on the repository you are in.',
@@ -58,6 +59,8 @@ export function planningAgentPrompt(
   const sections = [
     preamble,
     steeringLines(shaping),
+    // The developer's own direction for this pass outranks the standing config.
+    steering,
     planningMemoryBlock(planningMemory),
     exclusions,
     '---',

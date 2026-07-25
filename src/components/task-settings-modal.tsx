@@ -2,10 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
+import { MODEL_OPTIONS } from '@/lib/models';
 import type { Task } from '@/lib/types';
-import { MODEL_OPTIONS } from '@/components/shared/format';
-import { getTicketSettings, saveTicketSettings } from '@/components/shared/task-actions';
+import { EditToggle } from '@/components/shared/markdown-editor-section';
+import {
+  getExecutionConfig,
+  getTicketSettings,
+  saveTicketSettings,
+} from '@/components/shared/task-actions';
 
 /**
  * Per-ticket settings: name + description (written back to the GitHub issue),
@@ -22,8 +29,12 @@ export function TaskSettingsModal({
 }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState('');
-  const [model, setModel] = useState<string>(task.preferredModel ?? MODEL_OPTIONS[0].id);
+  // '' = no per-ticket override; the repo's Execution model is used.
+  const [model, setModel] = useState<string>(task.preferredModel ?? '');
+  const [repoModel, setRepoModel] = useState<string | null>(null);
   const [useWorkflow, setUseWorkflow] = useState(task.useWorkflow ?? false);
+  // The body is markdown — show it rendered by default, edit behind the toggle.
+  const [editingBody, setEditingBody] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,12 +44,19 @@ export function TaskSettingsModal({
       .then((settings) => {
         setTitle(settings.title);
         setBody(settings.body);
-        if (settings.preferredModel) setModel(settings.preferredModel);
+        setModel(settings.preferredModel ?? '');
         if (settings.useWorkflow !== undefined) setUseWorkflow(settings.useWorkflow);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoaded(true));
   }, [repoId, task.issueNumber]);
+
+  // Only to label the "repo default" option with the model it resolves to.
+  useEffect(() => {
+    getExecutionConfig(repoId)
+      .then((cfg) => setRepoModel(cfg.executionModel))
+      .catch(() => {});
+  }, [repoId]);
 
   const save = () => {
     if (!title.trim()) return;
@@ -92,22 +110,39 @@ export function TaskSettingsModal({
                 className="h-9 w-full rounded-md border border-border bg-elevated-secondary px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
               />
             </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium text-muted-foreground">
-                Description (the GitHub issue body — the agent&apos;s task spec)
-              </span>
-              <textarea
-                value={body}
-                onChange={(event) => setBody(event.target.value)}
-                className="min-h-52 w-full rounded-md border border-border bg-elevated-secondary px-3 py-2 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
-              />
-            </label>
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Description (the GitHub issue body — the agent&apos;s task spec)
+                </span>
+                <EditToggle editing={editingBody} onChange={setEditingBody} />
+              </div>
+              {editingBody ? (
+                <textarea
+                  value={body}
+                  onChange={(event) => setBody(event.target.value)}
+                  className="min-h-52 w-full rounded-md border border-border bg-elevated-secondary px-3 py-2 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
+                />
+              ) : (
+                <div className="markdown-preview min-h-52 max-h-96 w-full overflow-auto rounded-md border border-border bg-elevated-secondary px-3 py-2">
+                  {body.trim() ? (
+                    <Markdown remarkPlugins={[remarkGfm]}>{body}</Markdown>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">No description yet.</p>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="flex flex-wrap items-center gap-6">
               <label className="flex items-center gap-2">
                 <span className="text-xs font-medium text-muted-foreground">Model</span>
                 <select
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
+                  // No per-ticket override shows the repo's model as the selection.
+                  value={model || repoModel || ''}
+                  // Picking the repo's model clears the override rather than pinning it.
+                  onChange={(event) =>
+                    setModel(event.target.value === repoModel ? '' : event.target.value)
+                  }
                   className="h-8 rounded-md border border-border bg-elevated-secondary px-2 text-xs font-medium outline-none focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
                 >
                   {MODEL_OPTIONS.map(({ id, label }) => (

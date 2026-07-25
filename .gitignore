@@ -32,3 +32,6 @@ next-env.d.ts
 
 # app data (repo registry etc.)
 /data/
+
+# claude code local settings
+.claude/settings.local.json
