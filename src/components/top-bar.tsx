@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Plus } from 'lucide-react';
@@ -61,8 +62,18 @@ export function TopBar() {
     <header className="sticky top-0 z-10 border-b border-border bg-main-surface-primary">
       <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between px-5 py-3">
       <div className="flex items-center gap-5">
-        <Link href="/" className="text-sm font-bold hover:opacity-80">
-          Claude Agents Orchestrator
+        <Link href="/" className="flex items-center gap-2.5 hover:opacity-80">
+          {/* Cropped from the full logo art; the cream plate is part of the
+              mark, so it keeps a rounded tile on both themes. */}
+          <Image
+            src="/hydra-mark.png"
+            alt=""
+            width={160}
+            height={99}
+            priority
+            className="h-8 w-auto rounded-md"
+          />
+          <span className="text-sm font-bold">Claude Hydra</span>
         </Link>
         <div className="flex items-center gap-1.5">
           <select

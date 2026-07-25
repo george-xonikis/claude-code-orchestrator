@@ -1,4 +1,6 @@
-# Claude Code Orchestrator
+# Claude Hydra
+
+![Claude Hydra — multi-agent orchestration](public/hydra-logo.png)
 
 Local dashboard that runs autonomous Claude Code agents against a repo's GitHub issues: a kanban of every open issue, one-click agent sessions in isolated git worktrees, planning agents that propose new tasks toward your goal, and a review-then-push gate so nothing reaches GitHub without you. Standalone Next.js app — runs on your machine, never deployed.
 

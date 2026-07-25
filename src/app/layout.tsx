@@ -9,9 +9,9 @@ const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
 const geistMono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Claude Orchestrator',
+  title: 'Claude Hydra',
   description:
-    'Local dev tool: run autonomous Claude Code agents against agent-ready GitHub issues.',
+    'Multi-agent orchestration: run autonomous Claude Code agents against agent-ready GitHub issues.',
 };
 
 // Applies the persisted theme before first paint so a dark-mode reload doesn't flash light.
