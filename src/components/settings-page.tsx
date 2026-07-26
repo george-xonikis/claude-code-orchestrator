@@ -533,7 +533,7 @@ export function SettingsPage() {
                     value={cfg.peAgent}
                     agents={agents}
                     onChange={(v) => patch({ peAgent: v })}
-                    defaultLabel="Default (principal-engineer)"
+                    defaultLabel="Not assigned"
                   />
                 </Row>
                 <Row label="Product Manager (PM)">
@@ -541,7 +541,7 @@ export function SettingsPage() {
                     value={cfg.pmAgent}
                     agents={agents}
                     onChange={(v) => patch({ pmAgent: v })}
-                    defaultLabel="Default (product-manager)"
+                    defaultLabel="Not assigned"
                   />
                 </Row>
               </Section>
