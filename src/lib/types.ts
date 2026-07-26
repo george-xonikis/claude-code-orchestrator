@@ -14,10 +14,6 @@ export interface RepoInfo {
   name: string;
   /** Absolute path of the local checkout. */
   path: string;
-  /** Whether <repo>/.claude/agents/ contains both planning persona files (computed at read time). */
-  hasPersonas?: boolean;
-  /** Which individual planning persona files exist (computed at read time). */
-  personas?: { engineer: boolean; pm: boolean };
   /** GitHub web URL derived from the `origin` remote (computed at read time; absent if unparsable). */
   htmlUrl?: string;
 }
@@ -30,6 +26,16 @@ export interface AgentMeta {
   description: string;
   /** The .md filename (for display / debugging). */
   file: string;
+}
+
+/** One skill discovered under a repo's .claude/skills/<dir>/SKILL.md. */
+export interface SkillMeta {
+  /** Frontmatter `name` (falls back to the directory name). */
+  name: string;
+  /** Frontmatter `description` (may be empty). */
+  description: string;
+  /** The skill's directory name under .claude/skills/. */
+  dir: string;
 }
 
 export type TaskStatus = 'ready' | 'working' | 'needs_input' | 'committed' | 'pr_open' | 'failed';
@@ -54,6 +60,8 @@ export interface Task {
   branch?: string;
   prNumber?: number;
   prUrl?: string;
+  /** The open PR conflicts with the default branch (from `gh pr view --json mergeable` during polls). */
+  prConflicts?: boolean;
   question?: string;
   error?: string;
   startedAt?: string;
@@ -95,7 +103,7 @@ export interface PlanningLogLine {
   text: string;
 }
 
-/** One planning-pass run, newest first in .orchestrator/planning.json. */
+/** One planning-pass run, newest first in .claude-hydra/planning.json. */
 export interface PlanningPass {
   id: string;
   startedAt: string;
@@ -133,7 +141,7 @@ export interface RepoOverview {
   lastActivityAt?: string;
 }
 
-/** One line in .orchestrator/logs/issue-{n}.jsonl and on the /api/tasks/[n]/logs SSE stream. */
+/** One line in .claude-hydra/logs/issue-{n}.jsonl and on the /api/tasks/[n]/logs SSE stream. */
 export interface LogEvent {
   ts: string;
   kind: 'prompt' | 'tool' | 'edit' | 'test' | 'commit' | 'question' | 'info' | 'error' | 'result';

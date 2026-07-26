@@ -1,5 +1,6 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { dataDir } from '@/server/core/data-dir';
 import { DEFAULT_EXECUTION_MODEL, isKnownModel } from '@/lib/models';
 import { sanitizeManualQueue } from '@/lib/queue-order';
 import type { RepoInfo } from '@/lib/types';
@@ -7,10 +8,10 @@ import type { RepoInfo } from '@/lib/types';
 /**
  * Per-repo EXECUTION config — the knobs that govern how agent sessions run and
  * how the auto-pickup loop drains ready issues. Persisted in
- * <repoPath>/.orchestrator/execution.json, separate from planning.json.
+ * <repoPath>/.claude-hydra/execution.json, separate from planning.json.
  *
- * Split out of the old catch-all planning config: these are execution concerns
- * (the loop, concurrency, the pre-commit review gate), not planning. Existing
+ * Session-management knobs only: what agents may do is the managed repo's
+ * business (its CLAUDE.md and .claude/ rules), never configured here. Existing
  * repos are migrated once, on first read, from their legacy planning.json.
  */
 export interface ExecutionConfig {
@@ -24,8 +25,6 @@ export interface ExecutionConfig {
   tasksPerRun: number | null;
   /** How often the loop polls GitHub for this repo's issues, in minutes; null = off. */
   pollMinutes: number | null;
-  /** Reviewer subagent `name`s an execution agent MUST run before it may commit; empty = no gate. */
-  reviewerAgents: string[];
   /** Model agent sessions run on; a ticket's own preferredModel overrides it. */
   executionModel: string;
   /** Issue numbers the developer arranged by hand; they drain first, in this order. */
@@ -38,40 +37,22 @@ const DEFAULTS: ExecutionConfig = {
   maxActive: 2,
   tasksPerRun: null,
   pollMinutes: 2,
-  reviewerAgents: [],
   executionModel: DEFAULT_EXECUTION_MODEL,
   manualQueue: [],
 };
 
 function executionFile(repoPath: string): string {
-  return path.join(repoPath, '.orchestrator', 'execution.json');
+  return path.join(dataDir(repoPath), 'execution.json');
 }
 
 function planningFile(repoPath: string): string {
-  return path.join(repoPath, '.orchestrator', 'planning.json');
+  return path.join(dataDir(repoPath), 'planning.json');
 }
 
 const clampInt = (value: unknown, min: number, max: number, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value)
     ? Math.max(min, Math.min(max, Math.round(value)))
     : fallback;
-
-/** Trim, drop blanks, de-dupe (lowercased), and cap the reviewer-agent list. */
-function sanitizeReviewerAgents(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const names: string[] = [];
-  for (const item of value) {
-    if (typeof item !== 'string') continue;
-    const trimmed = item.trim().slice(0, 100);
-    const key = trimmed.toLowerCase();
-    if (!trimmed || seen.has(key)) continue;
-    seen.add(key);
-    names.push(trimmed);
-    if (names.length >= 10) break;
-  }
-  return names;
-}
 
 /** Shape of the execution fields as they lived on the legacy planning.json. */
 type LegacyFields = Partial<ExecutionConfig> & { autonomous?: boolean };
@@ -95,7 +76,6 @@ function normalize(src: LegacyFields): ExecutionConfig {
     tasksPerRun: src.tasksPerRun == null ? null : clampInt(src.tasksPerRun, 1, 100, 4),
     pollMinutes:
       src.pollMinutes === undefined ? 2 : src.pollMinutes === null ? null : clampInt(src.pollMinutes, 1, 60, 2),
-    reviewerAgents: sanitizeReviewerAgents(src.reviewerAgents),
     // Unknown/removed model ids fall back to the default rather than failing at
     // session start.
     executionModel: isKnownModel(src.executionModel)
@@ -143,8 +123,6 @@ export async function setExecutionConfig(
   if (patch.pollMinutes !== undefined)
     store.pollMinutes =
       patch.pollMinutes === null ? null : clampInt(patch.pollMinutes, 1, 60, store.pollMinutes ?? 2);
-  if (patch.reviewerAgents !== undefined)
-    store.reviewerAgents = sanitizeReviewerAgents(patch.reviewerAgents);
   if (patch.executionModel !== undefined && isKnownModel(patch.executionModel))
     store.executionModel = patch.executionModel;
   if (patch.manualQueue !== undefined) store.manualQueue = sanitizeManualQueue(patch.manualQueue);

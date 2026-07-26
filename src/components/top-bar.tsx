@@ -4,9 +4,9 @@ import { useEffect, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { CircleHelp, Settings } from 'lucide-react';
 
 import { countActiveSessions, getPlanning } from '@/components/shared/task-actions';
-import { ThemeToggleButton } from '@/components/shared/theme-toggle';
 import { useOverview } from '@/components/shared/use-overview';
 import { useRepo } from '@/components/shared/use-repo';
 import { useTasks } from '@/components/shared/use-tasks';
@@ -105,14 +105,43 @@ function RepoNav({ pathname }: { pathname: string }) {
 }
 
 /**
- * Two modes keyed on the route: the overview (`/`) is fleet-scoped — brand plus
- * fleet totals, no nav. Everything else is repo-scoped: the selected repo's
- * name, its Board/Planning/Settings nav, and its own chip. Repo switching
- * happens on the overview, so there is no repo dropdown here.
+ * Two modes keyed on the route: global pages (the overview `/` and `/help`) are
+ * fleet-scoped — brand plus fleet totals, no nav. Everything else is
+ * repo-scoped: the selected repo's name, its Board/Planning/Settings nav, and
+ * its own chip. Repo switching happens on the overview, so there is no repo
+ * dropdown here.
  */
+/** Icon link in the top bar's global controls (App settings, Help). */
+function GlobalIconLink({
+  href,
+  label,
+  active,
+  children,
+}: {
+  href: string;
+  label: string;
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-label={label}
+      title={label}
+      className={`inline-flex h-8 w-8 items-center justify-center rounded-md border border-border ${
+        active
+          ? 'bg-background-hover text-foreground'
+          : 'bg-elevated-secondary text-muted-foreground hover:bg-background-hover hover:text-foreground'
+      }`}
+    >
+      {children}
+    </Link>
+  );
+}
+
 export function TopBar() {
   const pathname = usePathname();
-  const onOverview = pathname === '/';
+  const globalPage = pathname === '/' || pathname === '/help' || pathname === '/app-settings';
 
   return (
     <header className="sticky top-0 z-10 border-b border-border bg-main-surface-primary">
@@ -131,11 +160,20 @@ export function TopBar() {
             />
             <span className="text-sm font-bold">Claude Hydra</span>
           </Link>
-          {!onOverview && <RepoNav pathname={pathname} />}
+          {!globalPage && <RepoNav pathname={pathname} />}
         </div>
         <div className="flex items-center gap-3">
-          {onOverview ? <FleetChip /> : <RepoChip />}
-          <ThemeToggleButton />
+          {globalPage ? <FleetChip /> : <RepoChip />}
+          <GlobalIconLink
+            href="/app-settings"
+            label="App settings"
+            active={pathname === '/app-settings'}
+          >
+            <Settings className="h-4 w-4" />
+          </GlobalIconLink>
+          <GlobalIconLink href="/help" label="How Hydra works" active={pathname === '/help'}>
+            <CircleHelp className="h-4 w-4" />
+          </GlobalIconLink>
         </div>
       </div>
     </header>

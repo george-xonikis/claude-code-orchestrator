@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { errorResponse } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { listRepoAgents } from '@/server/agents';
+import { listRepoAgents } from '@/server/core/agents';
 
 /** GET /api/agents?repo=<id> -> AgentMeta[] discovered under the repo's .claude/agents/. */
 export async function GET(request: Request) {

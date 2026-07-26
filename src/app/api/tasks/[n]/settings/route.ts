@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, parseIssueNumber, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { getIssueDetails } from '@/server/github';
-import { saveTicketSettings } from '@/server/loop';
-import { getTasks } from '@/server/state';
+import { getIssueDetails } from '@/server/core/github';
+import { saveTicketSettings } from '@/server/loop/loop';
+import { getTasks } from '@/server/state/state';
 
 /** GET /api/tasks/[n]/settings?repo= -> {title, body, preferredModel, useWorkflow}. */
 export async function GET(

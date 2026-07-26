@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { errorResponse, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { pollNow } from '@/server/loop';
+import { pollNow } from '@/server/loop/loop';
 
 /** POST /api/poll?repo=<id> -> run one poll cycle immediately ("Poll now"). */
 export async function POST(request: Request) {

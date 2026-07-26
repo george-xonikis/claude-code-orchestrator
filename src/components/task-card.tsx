@@ -11,6 +11,7 @@ import { StatusBadge } from '@/components/shared/status-badge';
 import {
   isNonAgentTask,
   pushTask,
+  resolveTaskConflicts,
   retryTask,
   startTask,
   stopTask,
@@ -236,8 +237,11 @@ function NeedsInputCard({ task }: { task: Task }) {
 }
 
 function PrOpenCard({ task }: { task: Task }) {
+  const repoId = useRepoId();
+  const [busy, setBusy] = useState(false);
+  const conflicts = task.prConflicts === true;
   return (
-    <CardShell task={task}>
+    <CardShell task={task} className={conflicts ? 'border border-destructive/50' : undefined}>
       <div className="flex items-center justify-between pr-8">
         <div className="text-xs font-medium text-muted-foreground">#{task.issueNumber}</div>
         <StatusBadge status="pr_open" />
@@ -245,19 +249,44 @@ function PrOpenCard({ task }: { task: Task }) {
       <div className="mt-1 line-clamp-2 text-sm font-medium leading-snug">{task.title}</div>
       <MetaRow task={task} />
       {(task.prNumber ?? task.branch) && (
-        <div className="mt-2 truncate font-mono text-[11px] text-muted-foreground">
-          {task.prNumber ? `PR #${task.prNumber}` : task.branch}
+        <div className="mt-2 flex items-center gap-1.5 truncate pb-2 font-mono text-[11px] text-muted-foreground">
+          <span>{task.prNumber ? `PR #${task.prNumber}` : task.branch}</span>
+          {conflicts && (
+            <span className="rounded-full bg-destructive/15 px-1.5 py-0.5 font-sans font-medium text-destructive">
+              conflicts
+            </span>
+          )}
         </div>
       )}
-      <a
-        href={task.prUrl ?? '#'}
-        target="_blank"
-        rel="noreferrer"
-        onClick={(event) => event.stopPropagation()}
-        className="mt-auto inline-flex h-8 w-full shrink-0 items-center justify-center rounded-md border border-border bg-elevated-secondary px-2.5 text-xs font-medium whitespace-nowrap hover:bg-background-hover"
-      >
-        Review PR ↗
-      </a>
+      <div className="mt-auto flex gap-1.5">
+        {conflicts && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={stop(() => {
+              setBusy(true);
+              resolveTaskConflicts(repoId, task.issueNumber).catch((err) => {
+                alertActionError(err);
+                setBusy(false);
+              });
+            })}
+            className="inline-flex h-8 flex-1 items-center justify-center rounded-md bg-primary px-2.5 text-xs font-medium whitespace-nowrap text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          >
+            Resolve conflicts
+          </button>
+        )}
+        <a
+          href={task.prUrl ?? '#'}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(event) => event.stopPropagation()}
+          className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-border bg-elevated-secondary px-2.5 text-xs font-medium whitespace-nowrap hover:bg-background-hover ${
+            conflicts ? '' : 'w-full'
+          }`}
+        >
+          Review PR ↗
+        </a>
+      </div>
     </CardShell>
   );
 }
@@ -290,7 +319,7 @@ function CommittedCard({ task }: { task: Task }) {
           })}
           className="inline-flex h-8 flex-1 items-center justify-center rounded-md bg-primary px-2.5 text-xs font-medium whitespace-nowrap text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
-          ⇧ Push &amp; open PR
+          {task.prNumber ? '⇧ Push update to PR' : '⇧ Push & open PR'}
         </button>
         <button
           type="button"
@@ -308,13 +337,23 @@ function FailedCard({ task }: { task: Task }) {
   const router = useRouter();
   const repoId = useRepoId();
   const [busy, setBusy] = useState(false);
+  // A failed task carrying a PR is a crashed conflict-resolution session — its
+  // PR is still open (and still conflicting); Retry restarts the resolution.
+  const isResolveFailure = Boolean(task.prNumber);
   return (
     <CardShell task={task} className="border border-destructive/40">
       <div className="text-xs font-medium text-muted-foreground">#{task.issueNumber}</div>
       <div className="mt-1 line-clamp-2 text-sm font-medium leading-snug">{task.title}</div>
       <MetaRow task={task} />
-      {task.branch && (
-        <div className="mt-2 truncate font-mono text-[11px] text-muted-foreground">{task.branch}</div>
+      {(task.prNumber ?? task.branch) && (
+        <div className="mt-2 flex items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground">
+          <span>{task.prNumber ? `PR #${task.prNumber}` : task.branch}</span>
+          {task.prConflicts && (
+            <span className="rounded-full bg-destructive/15 px-1.5 py-0.5 font-sans font-medium text-destructive">
+              conflicts
+            </span>
+          )}
+        </div>
       )}
       <div className="mt-2 line-clamp-2 text-[11px] leading-snug text-destructive">
         {task.error ?? 'Agent session failed'}
@@ -332,7 +371,7 @@ function FailedCard({ task }: { task: Task }) {
           })}
           className="inline-flex h-8 flex-1 items-center justify-center rounded-md bg-primary px-2.5 text-xs font-medium whitespace-nowrap text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
-          Retry
+          {isResolveFailure ? 'Retry resolve' : 'Retry'}
         </button>
         <button
           type="button"

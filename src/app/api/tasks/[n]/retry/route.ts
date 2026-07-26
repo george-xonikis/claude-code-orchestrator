@@ -6,7 +6,7 @@ import {
   rejectNonLocal,
 } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { retryIssue } from '@/server/loop';
+import { retryIssue } from '@/server/loop/loop';
 
 /** POST /api/tasks/[n]/retry?repo=<id> -> re-claim a failed issue, reusing its worktree. */
 export async function POST(

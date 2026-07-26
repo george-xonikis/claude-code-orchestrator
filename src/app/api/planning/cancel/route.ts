@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { errorResponse, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { cancelPlanningPass } from '@/server/planning';
+import { cancelPlanningPass } from '@/server/planning/planning';
 
 /** POST /api/planning/cancel?repo=<id> -> abort the in-flight planning pass. */
 export async function POST(request: Request) {

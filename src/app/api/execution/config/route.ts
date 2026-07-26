@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
 import { isKnownModel, MODEL_OPTIONS } from '@/lib/models';
 import { resolveRepo } from '@/lib/repo-params';
-import { type ExecutionConfig, getExecutionConfig, setExecutionConfig } from '@/server/execution';
+import { type ExecutionConfig, getExecutionConfig, setExecutionConfig } from '@/server/execution/config';
 
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -63,12 +63,6 @@ export async function POST(request: Request) {
         return badRequest('manualQueue must be an array of issue numbers');
       }
       patch.manualQueue = body.manualQueue as number[];
-    }
-    if ('reviewerAgents' in body) {
-      if (!Array.isArray(body.reviewerAgents) || !body.reviewerAgents.every((a) => typeof a === 'string')) {
-        return badRequest('reviewerAgents must be an array of strings');
-      }
-      patch.reviewerAgents = body.reviewerAgents as string[];
     }
     if ('executionModel' in body) {
       if (!isKnownModel(body.executionModel)) {

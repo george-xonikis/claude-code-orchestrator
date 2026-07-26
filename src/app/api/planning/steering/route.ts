@@ -5,9 +5,9 @@ import {
   getPlanningSteering,
   sendPlanningSteering,
   setPlanningSteering,
-} from '@/server/planning';
+} from '@/server/planning/planning';
 
-/** GET /api/planning/steering?repo=<id> -> the stored steering transcript. */
+/** GET /api/planning/steering?repo=<id> -> the stored ad-hoc planning transcript. */
 export async function GET(request: Request) {
   const repo = await resolveRepo(request);
   if (repo instanceof NextResponse) return repo;
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
   }
 }
 
-/** DELETE /api/planning/steering?repo=<id> -> clear the steering transcript. */
+/** DELETE /api/planning/steering?repo=<id> -> clear the ad-hoc planning transcript. */
 export async function DELETE(request: Request) {
   const forbidden = rejectNonLocal(request);
   if (forbidden) return forbidden;

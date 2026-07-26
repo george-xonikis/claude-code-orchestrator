@@ -13,10 +13,11 @@ import {
 } from '@/components/shared/task-actions';
 
 /**
- * Pass-level steering chat, as a right-side drawer alongside the proposals.
- * Talk through what the next planning pass should look for: turns are cheap (no
- * repo scan) and never produce proposals — those come only from a regenerated
- * pass, which injects this transcript into the PE/PM and synthesis prompts.
+ * Ad-hoc planning chat, as a right-side drawer alongside the proposals.
+ * Talk through what an ad-hoc planning pass should look for: turns are cheap
+ * (no repo scan) and never produce proposals — those come only from running the
+ * ad-hoc pass, which injects this transcript into the PE/PM and synthesis
+ * prompts. (The API layer still calls this channel "steering".)
  */
 export function PlanningSteeringChat({
   repoId,
@@ -67,15 +68,15 @@ export function PlanningSteeringChat({
   return (
     <aside className="sticky top-20 flex h-[calc(100dvh-6rem)] w-[26rem] shrink-0 flex-col self-start rounded-lg border border-border bg-main-surface-primary">
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-        <div className="text-sm font-semibold">Steer the next plan</div>
+        <div className="text-sm font-semibold">Ad-hoc planning</div>
         <div className="flex shrink-0 items-center gap-1">
           {messages.length > 0 && (
             <button
               type="button"
               onClick={clear}
               disabled={thinking}
-              aria-label="Clear steering"
-              title="Clear the direction so the next pass runs unsteered"
+              aria-label="Clear ad-hoc direction"
+              title="Clear the direction so the next pass runs without it"
               className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-background-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
             >
               <Trash2 className="h-3.5 w-3.5" />
@@ -85,7 +86,7 @@ export function PlanningSteeringChat({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close steering chat"
+            aria-label="Close ad-hoc planning chat"
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md hover:bg-background-hover"
           >
             <X className="h-4 w-4" />
@@ -98,8 +99,9 @@ export function PlanningSteeringChat({
         <div className="mt-auto space-y-3">
           {messages.length === 0 && (
             <p className="text-xs leading-5 text-muted-foreground">
-              Shape what the next pass looks for. Claude won&apos;t write proposals — hit{' '}
-              <span className="font-medium">Generate plan</span> below when the direction is right.
+              Shape what an ad-hoc pass looks for. Claude won&apos;t write proposals — hit{' '}
+              <span className="font-medium">Run ad-hoc pass</span> below when the direction is
+              right.
             </p>
           )}
           {messages.map((message, index) =>
@@ -150,7 +152,7 @@ export function PlanningSteeringChat({
             type="button"
             disabled={planning || !canPlan}
             onClick={onPlan}
-            title="Run a planning pass steered by this conversation"
+            title="Run an ad-hoc planning pass shaped by this conversation"
             className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-xs font-semibold hover:bg-background-hover disabled:opacity-50"
           >
             {planning ? (
@@ -158,7 +160,7 @@ export function PlanningSteeringChat({
             ) : (
               <Play className="h-3.5 w-3.5" />
             )}
-            {planning ? 'Generating…' : 'Generate plan'}
+            {planning ? 'Running…' : 'Run ad-hoc pass'}
           </button>
         </div>
       </div>

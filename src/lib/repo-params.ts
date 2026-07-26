@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { badRequest } from '@/lib/api';
-import { getRepo } from '@/server/repos';
+import { getRepo } from '@/server/core/repos';
 import type { RepoInfo } from '@/lib/types';
 
 /**

@@ -123,22 +123,24 @@ export async function createWorktree(repoPath: string, issueNumber: number): Pro
   const branch = branchName(issueNumber);
   assertInsideWorktreesDir(repoPath, wtPath);
 
-  // Reuse path: worktree already registered for this path (retry path).
+  // Reuse path: worktree registered AND present on disk (retry path).
   const existing = (await listWorktrees(repoPath)).find(
     (wt) => wt.issueNumber === issueNumber,
   );
-  if (existing) {
+  if (existing && fs.existsSync(existing.path)) {
     return existing;
   }
 
   await git(repoPath, ['fetch', 'origin']);
 
-  // Stale directory left behind without a registered worktree — prune first.
+  // Clear stale state in EITHER direction before adding:
+  // - registered but directory missing (interrupted removal — `git worktree
+  //   add` refuses with "missing but already registered"): prune drops it.
+  // - directory present but unregistered (we'd have returned above if both
+  //   were healthy): remove the orphan directory.
+  await git(repoPath, ['worktree', 'prune']);
   if (fs.existsSync(wtPath)) {
-    await git(repoPath, ['worktree', 'prune']);
-    if (fs.existsSync(wtPath)) {
-      fs.rmSync(wtPath, { recursive: true, force: true });
-    }
+    fs.rmSync(wtPath, { recursive: true, force: true });
   }
 
   fs.mkdirSync(worktreesDir(repoPath), { recursive: true });
@@ -173,12 +175,29 @@ export async function removeWorktree(repoPath: string, issueNumber: number): Pro
   // NOTE: the branch agent/issue-{n} is intentionally never deleted.
 }
 
-/** Push an issue's branch to origin (developer-triggered from the dashboard). */
-export async function pushBranch(repoPath: string, issueNumber: number): Promise<void> {
+/**
+ * Push an issue's branch to origin (developer-triggered from the dashboard).
+ * `forceWithLease` is used when pushing a rebased branch over its open PR
+ * (conflict resolution): safe because agent branches are single-author, and
+ * the lease still refuses if the remote moved unexpectedly.
+ */
+export async function pushBranch(
+  repoPath: string,
+  issueNumber: number,
+  options: { forceWithLease?: boolean } = {}
+): Promise<void> {
   assertValidIssueNumber(issueNumber);
   const wtPath = worktreePath(repoPath, issueNumber);
   assertInsideWorktreesDir(repoPath, wtPath);
-  await git(repoPath, ['-C', wtPath, 'push', '-u', 'origin', branchName(issueNumber)]);
+  await git(repoPath, [
+    '-C',
+    wtPath,
+    'push',
+    ...(options.forceWithLease ? ['--force-with-lease'] : []),
+    '-u',
+    'origin',
+    branchName(issueNumber),
+  ]);
 }
 
 /** List orchestrator-managed worktrees currently present under <repoPath>/.worktrees/. */

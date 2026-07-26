@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, parseIssueNumber, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { pushIssue } from '@/server/loop';
+import { pushIssue } from '@/server/loop/loop';
 
 /** POST /api/tasks/[n]/push?repo=<id> -> push the committed branch and open its PR. */
 export async function POST(

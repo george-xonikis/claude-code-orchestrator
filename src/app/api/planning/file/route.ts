@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { fileProposals } from '@/server/planning';
+import { fileProposals } from '@/server/planning/planning';
 
 /** POST /api/planning/file?repo=<id> {passId, proposalIds} -> create issues for approved proposals. */
 export async function POST(request: Request) {

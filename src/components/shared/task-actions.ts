@@ -42,9 +42,14 @@ export function retryTask(repoId: string, issueNumber: number): Promise<void> {
   return post(`/api/tasks/${issueNumber}/retry${repoQuery(repoId)}`);
 }
 
-/** Push the committed branch and open its PR — the only path that publishes to GitHub. */
+/** Push the committed branch and open its PR (or force-push a rebased branch over its existing PR). */
 export function pushTask(repoId: string, issueNumber: number): Promise<void> {
   return post(`/api/tasks/${issueNumber}/push${repoQuery(repoId)}`);
+}
+
+/** Start a conflict-resolution session for a pr_open task whose PR conflicts with the default branch. */
+export function resolveTaskConflicts(repoId: string, issueNumber: number): Promise<void> {
+  return post(`/api/tasks/${issueNumber}/resolve${repoQuery(repoId)}`);
 }
 
 export type ManualStatus = Extract<TaskStatus, 'ready' | 'committed' | 'failed'>;
@@ -62,8 +67,6 @@ export function setTaskStatus(
 
 export interface OrchestratorSettings {
   goal: string;
-  /** Execution memory: codebase gotchas agents hit while implementing. */
-  memory: string;
   /** Planning memory: prioritization guidance the PE/PM personas read. */
   planningMemory: string;
 }
@@ -91,14 +94,45 @@ export async function getPlanning(repoId: string): Promise<PlanningData> {
 
 export type PlanningRole = 'engineer' | 'pm';
 
-/** Run a planning pass. Omit roles for the full PE + PM pass, or pass a single role. */
-export function startPlanningPass(repoId: string, roles?: PlanningRole[]): Promise<void> {
-  return post(`/api/planning/start${repoQuery(repoId)}`, roles ? { roles } : undefined);
+/**
+ * Run a planning pass. Omit roles for the full PE + PM pass, or pass a single
+ * role; adHoc runs a one-off pass outside the scheduled cadence.
+ */
+export function startPlanningPass(
+  repoId: string,
+  opts?: { roles?: PlanningRole[]; adHoc?: boolean }
+): Promise<void> {
+  const body: { roles?: PlanningRole[]; adHoc?: boolean } = {};
+  if (opts?.roles) body.roles = opts.roles;
+  if (opts?.adHoc !== undefined) body.adHoc = opts.adHoc;
+  return post(
+    `/api/planning/start${repoQuery(repoId)}`,
+    Object.keys(body).length > 0 ? body : undefined
+  );
 }
 
 /** Abort the in-flight planning pass for a repo. */
 export function cancelPlanningPass(repoId: string): Promise<void> {
   return post(`/api/planning/cancel${repoQuery(repoId)}`);
+}
+
+/** Lifecycle of the one-shot product-map bootstrap run. */
+export interface ProductMapState {
+  status: 'idle' | 'running' | 'done' | 'failed';
+  finishedAt?: string;
+  error?: string;
+}
+
+/** Kick off the one-shot product-map bootstrap (the brief agent maps the product). */
+export function runProductMapBootstrap(repoId: string): Promise<void> {
+  return post(`/api/planning/product-map${repoQuery(repoId)}`);
+}
+
+/** Current product-map bootstrap state, for the settings UI to poll. */
+export async function getProductMapState(repoId: string): Promise<ProductMapState> {
+  const res = await fetch(`/api/planning/product-map${repoQuery(repoId)}`);
+  if (!res.ok) throw new Error(`GET /api/planning/product-map failed with ${res.status}`);
+  return (await res.json()) as ProductMapState;
 }
 
 /**
@@ -160,9 +194,11 @@ export interface PlanningConfig {
   pmAgent: string | null;
   /** Agent that maintains the repo's product brief; null = none. */
   briefAgent: string | null;
+  /** Model id planning-pass agent sessions run on. */
+  planningModel: string;
 }
 
-/** Per-repo execution config — the auto-pickup loop + the pre-commit review gate. */
+/** Per-repo execution config — session-management knobs for the auto-pickup loop. */
 export interface ExecutionConfig {
   /** Auto-start agent sessions for ready proposed issues, up to maxActive. */
   autoStart: boolean;
@@ -174,8 +210,6 @@ export interface ExecutionConfig {
   tasksPerRun: number | null;
   /** How often the loop polls GitHub for this repo's issues, in minutes; null = off. */
   pollMinutes: number | null;
-  /** Reviewer subagent `name`s an execution agent MUST run before it may commit; empty = no gate. */
-  reviewerAgents: string[];
   /** Model agent sessions run on; a ticket's own preferredModel overrides it. */
   executionModel: string;
   /** Issue numbers arranged by hand in the queue; they drain first, in this order. */
@@ -209,6 +243,52 @@ export async function setExecutionConfig(
     throw new Error(body?.error ?? `POST /api/execution/config failed with ${res.status}`);
   }
   return (await res.json()) as ExecutionConfig;
+}
+
+/** Which agent-session prompt a template override applies to. */
+export type PromptKind =
+  | 'implementation'
+  | 'conflict'
+  | 'agents-planning'
+  | 'synthesis'
+  | 'adhoc-chat'
+  | 'proposal-discussion'
+  | 'product-map';
+
+/** One prompt kind's stored state from GET /api/prompts. */
+export interface PromptTemplateState {
+  /** The effective template (the override, or the built-in default). */
+  template: string;
+  /** True when an override is stored (app-level, in data/prompts/). */
+  isCustom: boolean;
+  /** The built-in default, for reset/compare. */
+  defaultTemplate: string;
+}
+
+export type PromptTemplates = Record<PromptKind, PromptTemplateState>;
+
+/** App-level (not repo-scoped): the templates apply to sessions in every managed repo. */
+export async function getPromptTemplates(): Promise<PromptTemplates> {
+  const res = await fetch('/api/prompts');
+  if (!res.ok) throw new Error(`GET /api/prompts failed with ${res.status}`);
+  return (await res.json()) as PromptTemplates;
+}
+
+/** Save one kind's override (null or blank resets to the default); echoes the full state. */
+export async function savePromptTemplate(
+  kind: PromptKind,
+  template: string | null
+): Promise<PromptTemplates> {
+  const res = await fetch('/api/prompts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, template }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `POST /api/prompts failed with ${res.status}`);
+  }
+  return (await res.json()) as PromptTemplates;
 }
 
 /** The repo's invocable subagents (from .claude/agents/), for the reviewer picker. */

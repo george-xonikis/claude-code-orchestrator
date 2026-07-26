@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
-import { addRepo, loadRepos } from '@/server/repos';
+import { addRepo, loadRepos } from '@/server/core/repos';
 
-/** GET /api/repos -> RepoInfo[] (including hasPersonas per repo). */
+/** GET /api/repos -> RepoInfo[]. */
 export async function GET() {
   try {
     return NextResponse.json(await loadRepos());

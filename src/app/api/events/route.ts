@@ -3,8 +3,8 @@ import { NextResponse } from 'next/server';
 import type { Task } from '@/lib/types';
 import { SSE_HEADERS } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { ensureLoopStarted } from '@/server/loop';
-import { getTasks, subscribe } from '@/server/state';
+import { ensureLoopStarted } from '@/server/loop/loop';
+import { getTasks, subscribe } from '@/server/state/state';
 
 export const dynamic = 'force-dynamic';
 

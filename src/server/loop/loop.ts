@@ -1,23 +1,26 @@
 import type { RepoInfo, Task } from '@/lib/types';
 import { orderQueue } from '@/lib/queue-order';
-import { requireReviewerAgents } from './agents';
-import { getExecutionConfig, setExecutionConfig } from './execution';
-import * as github from './github';
-import { loadRepos } from './repos';
-import * as sessions from './sessions';
-import * as state from './state';
-import * as worktrees from './worktrees';
+import { getExecutionConfig, setExecutionConfig } from '@/server/execution/config';
+import * as conflictFlow from '@/server/execution/flows/conflict';
+import * as implementationFlow from '@/server/execution/flows/implementation';
+import { activeCount, hasSlot, releaseSlot } from '@/server/execution/flows/slots';
+import * as github from '@/server/core/github';
+import { loadRepos } from '@/server/core/repos';
+import * as sessions from '@/server/execution/sessions';
+import * as state from '@/server/state/state';
+import * as worktrees from '@/server/core/worktrees';
 
 /**
- * Orchestration loop: polls GitHub for all open issues every 2 minutes so the
- * board stays current, and mirrors task status as agent-* labels
- * (agent-working -> agent-committed -> agent-pr / agent-failed, plus
- * agent-needs-input while a session is paused on a question).
- * Sessions start ONLY from the dashboard's Start button — never automatically.
+ * Orchestration LOOP — pure scheduling: poll cadence, issue discovery,
+ * reconcile/prune, the auto-pickup queue, restart recovery, and the GitHub
+ * label/worktree side effects of status changes. What a session actually DOES
+ * lives in the flow modules (src/server/flows/implementation.ts and
+ * flows/conflict.ts) — every task action here delegates to a flow.
  *
  * ONE global interval polls EVERY registered repo — the registry is re-read
- * each tick, so newly added repos join automatically. All per-repo loop state
- * (active session set, polling/recovery flags) is keyed by repo id.
+ * each tick, so newly added repos join automatically. Per-repo loop state
+ * (polling/recovery flags) is keyed by repo id; live-session slots live in
+ * flows/slots.ts, shared with the flows.
  *
  * The interval + wiring are lazily initialized behind a globalThis guard so
  * Next dev hot-reload doesn't duplicate the loop.
@@ -33,8 +36,6 @@ interface RepoLoopState {
   polling: boolean;
   /** Restart recovery has run for this repo in this process. */
   recovered: boolean;
-  /** Issues with a live session (working OR needs_input) — the slot count. */
-  active: Set<number>;
   /** Epoch ms of the last GitHub poll (0 = never), for the per-repo poll interval. */
   lastPolledAt: number;
   /** Tasks auto-pickup has started in the current run (reset when it's re-enabled). */
@@ -71,7 +72,6 @@ function repoLoop(repoId: string): RepoLoopState {
     s = {
       polling: false,
       recovered: false,
-      active: new Set(),
       lastPolledAt: 0,
       executedThisRun: 0,
       autoStartWas: false,
@@ -105,20 +105,19 @@ async function onStatusChange(
   issueNumber: number,
   task: Task
 ): Promise<void> {
-  const s = repoLoop(repo.id);
   switch (task.status) {
     case 'committed':
       // Session over, slot freed; the worktree stays until the developer pushes.
-      s.active.delete(issueNumber);
+      releaseSlot(repo.id, issueNumber);
       await github.setLabels(repo.path, issueNumber, ['agent-committed']);
       break;
     case 'pr_open':
-      s.active.delete(issueNumber);
+      releaseSlot(repo.id, issueNumber);
       await github.setLabels(repo.path, issueNumber, ['agent-pr']);
       await worktrees.removeWorktree(repo.path, issueNumber);
       break;
     case 'failed':
-      s.active.delete(issueNumber);
+      releaseSlot(repo.id, issueNumber);
       await github.setLabels(repo.path, issueNumber, ['agent-failed']);
       // Short reason only — never log dumps. Worktree is kept for retry.
       await github.commentOnIssue(
@@ -165,77 +164,6 @@ function handleSessionEvent(event: sessions.SessionEvent): void {
   })().catch((err) =>
     logError(`session event for ${event.repo.name}#${event.issueNumber}`, err)
   );
-}
-
-// ---------------------------------------------------------------------------
-// Claiming
-// ---------------------------------------------------------------------------
-
-/** Claim an issue: label agent-working, create/reuse worktree, start the session. */
-async function claim(
-  repo: RepoInfo,
-  issueNumber: number,
-  title: string,
-  model?: string,
-  useWorkflow = false
-): Promise<void> {
-  const s = repoLoop(repo.id);
-  s.active.add(issueNumber); // Reserve the slot up front.
-  try {
-    // Gate: the session's configured reviewer agents must exist before we start
-    // (throws here → caught below → task failed + issue comment). Validating
-    // before the worktree avoids creating a doomed one.
-    const { reviewerAgents, executionModel } = await getExecutionConfig(repo);
-    await requireReviewerAgents(repo, reviewerAgents);
-    await github.setLabels(repo.path, issueNumber, ['agent-working']);
-    const wt = await worktrees.createWorktree(repo.path, issueNumber);
-    await state.upsertTask(repo.path, {
-      issueNumber,
-      title,
-      status: 'working',
-      worktreePath: wt.path,
-      branch: wt.branch,
-      error: undefined,
-      question: undefined,
-      prNumber: undefined,
-      prUrl: undefined,
-    });
-    await sessions.startSession(
-      repo,
-      issueNumber,
-      wt.path,
-      wt.branch,
-      // The ticket's own model wins; otherwise the repo's configured default.
-      model ?? executionModel,
-      useWorkflow,
-      reviewerAgents
-    );
-  } catch (err) {
-    s.active.delete(issueNumber);
-    const message = err instanceof Error ? err.message : String(err);
-    // Into the log stream too — a claim failure must never be invisible there.
-    await state
-      .appendLog(repo.path, issueNumber, {
-        ts: new Date().toISOString(),
-        kind: 'error',
-        text: `Could not start session: ${message}`,
-      })
-      .catch(() => {});
-    await state
-      .upsertTask(repo.path, { issueNumber, status: 'failed', error: message })
-      .catch(() => {});
-    await github
-      .setLabels(repo.path, issueNumber, ['agent-failed'])
-      .catch(() => {});
-    await github
-      .commentOnIssue(
-        repo.path,
-        issueNumber,
-        `Agent orchestrator could not start a session: ${message}`
-      )
-      .catch(() => {});
-    throw err;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +216,7 @@ async function poll(repo: RepoInfo): Promise<void> {
     const discovered = new Set(issues.map((i) => i.number));
     for (const task of await state.getTasks(repo.path)) {
       const liveSession =
-        task.status === 'working' || task.status === 'needs_input' || s.active.has(task.issueNumber);
+        task.status === 'working' || task.status === 'needs_input' || hasSlot(repo.id, task.issueNumber);
       if (liveSession || discovered.has(task.issueNumber)) continue;
       const gone =
         task.status === 'ready' || (await github.issueIsClosed(repo.path, task.issueNumber));
@@ -297,7 +225,7 @@ async function poll(repo: RepoInfo): Promise<void> {
 
     // 2. Reconcile: non-active tasks whose branch now has an open PR -> pr_open.
     for (const task of await state.getTasks(repo.path)) {
-      if (s.active.has(task.issueNumber) || !task.branch) continue;
+      if (hasSlot(repo.id, task.issueNumber) || !task.branch) continue;
       if (
         task.status !== 'working' &&
         task.status !== 'needs_input' &&
@@ -306,6 +234,11 @@ async function poll(repo: RepoInfo): Promise<void> {
       ) {
         continue;
       }
+      // committed + prNumber = a finished conflict-resolution session whose
+      // rebased branch awaits the dashboard's force-push. Its PR is still open,
+      // so reconciling would flip it straight back to pr_open and hide the
+      // push button — leave it for the developer.
+      if (task.status === 'committed' && task.prNumber) continue;
       try {
         const pr = await github.findOpenPrForBranch(repo.path, task.branch);
         if (pr) {
@@ -328,6 +261,9 @@ async function poll(repo: RepoInfo): Promise<void> {
         logError(`reconcile ${repo.name}#${task.issueNumber}`, err);
       }
     }
+    // 3. Conflict detection is the conflict flow's concern — refresh the
+    // merge state of every task carrying an open PR.
+    await conflictFlow.refreshMergeStates(repo, logError);
     // NOTE: auto-pickup runs separately (every tick), independent of GitHub polling.
   } finally {
     s.polling = false;
@@ -338,7 +274,7 @@ async function poll(repo: RepoInfo): Promise<void> {
  * Auto-pickup: while under the per-repo concurrency cap, claim ready issues
  * (skipping `non-agent`), draining them in the configured queue order (oldest
  * issue first by default). No-op unless the repo has auto-pickup on and a GitHub
- * URL. `claim()` reserves the slot synchronously via `s.active.add`, so the cap
+ * URL. The implementation flow reserves the slot synchronously, so the cap
  * holds across iterations. Turning auto-pickup off just stops new pickups —
  * in-flight sessions keep running (never cancelled), and the merge gate stays
  * human: this only takes work as far as a commit.
@@ -365,12 +301,12 @@ async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
     s.autoStartWas = false;
     return;
   }
-  if (s.active.size >= maxActive) return;
+  if (activeCount(repo.id) >= maxActive) return;
 
   // Same ordering the board's queue shows — manual arrangement first, then the default.
   const queue = orderQueue(
     (await state.getTasks(repo.path)).filter((task) => {
-      if (task.status !== 'ready' || s.active.has(task.issueNumber)) return false;
+      if (task.status !== 'ready' || hasSlot(repo.id, task.issueNumber)) return false;
       return !(task.labels ?? []).some((label) => NON_AGENT_LABEL.test(label));
     }),
     queueOrder,
@@ -378,9 +314,9 @@ async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
   );
 
   for (const task of queue) {
-    if (s.active.size >= maxActive || capReached()) break;
+    if (activeCount(repo.id) >= maxActive || capReached()) break;
     try {
-      await claim(
+      await implementationFlow.claimIssue(
         repo,
         task.issueNumber,
         task.title || `Issue #${task.issueNumber}`,
@@ -389,7 +325,7 @@ async function autoStart(repo: RepoInfo, s: RepoLoopState): Promise<void> {
       );
       s.executedThisRun += 1;
     } catch (err) {
-      // claim() already records the failure on the task; keep draining the queue.
+      // The flow already records the failure on the task; keep draining the queue.
       logError(`auto-pickup ${repo.name}#${task.issueNumber}`, err);
     }
   }
@@ -532,7 +468,7 @@ export async function startIssue(
       `Issue #${issueNumber} is labeled "Non agent" — it must be implemented by a human`
     );
   }
-  await claim(
+  await implementationFlow.claimIssue(
     repo,
     issueNumber,
     title || `Issue #${issueNumber}`,
@@ -543,7 +479,9 @@ export async function startIssue(
 
 /**
  * Push a committed issue's branch and open its PR (backs POST /api/tasks/[n]/push).
- * The ONLY path that ever pushes — always developer-triggered, never the agent.
+ * Developer-triggered from the dashboard. (Whether agents may push themselves is
+ * the managed repo's own policy — Hydra doesn't block it; if one does, the
+ * reconcile step picks the PR up instead.)
  */
 export async function pushIssue(
   repo: RepoInfo,
@@ -573,24 +511,12 @@ export async function pushIssue(
     await onStatusChange(repo, issueNumber, merged).catch(() => {});
     throw new Error(message);
   }
-  await worktrees.pushBranch(repo.path, issueNumber);
-  const pr = await github.createPullRequest(
-    repo.path,
-    issueNumber,
-    task.branch,
-    task.title || `Issue #${issueNumber}`
-  );
-  await state.appendLog(repo.path, issueNumber, {
-    ts: new Date().toISOString(),
-    kind: 'result',
-    text: `Pushed ${task.branch} and opened PR: ${pr.url}`,
-  });
-  const merged = await state.upsertTask(repo.path, {
-    issueNumber,
-    status: 'pr_open',
-    prNumber: pr.number,
-    prUrl: pr.url,
-  });
+  // A task carrying a PR is a finished conflict resolution (update the existing
+  // PR); otherwise this publishes fresh work as a new PR. Either way the flow
+  // returns the merged task and the loop applies the label/worktree effects.
+  const merged = task.prNumber
+    ? await conflictFlow.pushUpdate(repo, task)
+    : await implementationFlow.pushNewPr(repo, task);
   await onStatusChange(repo, issueNumber, merged);
 }
 
@@ -667,9 +593,8 @@ export async function stopIssue(
   issueNumber: number
 ): Promise<void> {
   ensureLoopStarted();
-  const s = repoLoop(repo.id);
   await sessions.stopSession(repo, issueNumber);
-  s.active.delete(issueNumber);
+  releaseSlot(repo.id, issueNumber);
   const task = await findTask(repo, issueNumber);
   if (task && (task.status === 'working' || task.status === 'needs_input')) {
     // Direct upsert (not via session events) — no failure comment for manual stops.
@@ -700,12 +625,44 @@ export async function retryIssue(
   // A failed task's session is dead by definition — kill any stale registry
   // entry so retry can never trip over "a session is already running".
   await sessions.stopSession(repo, issueNumber);
+  // A failed CONFLICT session (the task carries a PR) retries in the conflict
+  // flow, not as a fresh implementation run.
+  if (task.prNumber) {
+    await conflictFlow.startResolve(repo, task);
+    return;
+  }
   // Retry prefers the ticket's configured model, else the one it last ran on.
-  await claim(
+  await implementationFlow.claimIssue(
     repo,
     issueNumber,
     task.title || `Issue #${issueNumber}`,
     task.preferredModel ?? task.model,
     task.useWorkflow ?? false
   );
+}
+
+// ---------------------------------------------------------------------------
+// PR conflict resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a conflicting PR (backs POST /api/tasks/[n]/resolve): starts a
+ * conflict-resolution session for a pr_open task flagged prConflicts.
+ */
+export async function resolveConflictsIssue(
+  repo: RepoInfo,
+  issueNumber: number
+): Promise<void> {
+  ensureLoopStarted();
+  const task = await findTask(repo, issueNumber);
+  if (!task) {
+    throw new Error(`Unknown issue #${issueNumber}`);
+  }
+  if (task.status !== 'pr_open' || !task.prNumber) {
+    throw new Error(`Issue #${issueNumber} has no open PR (status: ${task.status})`);
+  }
+  if (hasSlot(repo.id, issueNumber)) {
+    throw new Error(`Issue #${issueNumber} already has an active session`);
+  }
+  await conflictFlow.startResolve(repo, task);
 }

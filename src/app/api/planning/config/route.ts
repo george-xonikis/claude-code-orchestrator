@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
+import { isKnownModel, MODEL_OPTIONS } from '@/lib/models';
 import { resolveRepo } from '@/lib/repo-params';
 import {
   getPlanningConfig,
@@ -7,7 +8,7 @@ import {
   type PlanningConfig,
   type PlanningRole,
   setPlanningConfig,
-} from '@/server/planning';
+} from '@/server/planning/planning';
 
 const ROLES: readonly PlanningRole[] = ['engineer', 'pm'];
 
@@ -81,6 +82,14 @@ export async function POST(request: Request) {
         }
         patch[key] = body[key] as string | null;
       }
+    }
+    if ('planningModel' in body) {
+      if (!isKnownModel(body.planningModel)) {
+        return badRequest(
+          `planningModel must be one of ${MODEL_OPTIONS.map((m) => m.id).join(', ')}`
+        );
+      }
+      patch.planningModel = body.planningModel;
     }
 
     await setPlanningConfig(repo, patch);

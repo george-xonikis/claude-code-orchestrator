@@ -1,26 +1,29 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { dataDir } from '@/server/core/data-dir';
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { PlanningLogLine, PlanningPass, PlanningProposal, RepoInfo } from '@/lib/types';
-import { listRepoAgents } from './agents';
-import { createIssue } from './github';
+import { isKnownModel } from '@/lib/models';
+import { listRepoAgents } from '@/server/core/agents';
+import { createIssue } from '@/server/core/github';
 import {
+  adHocChatPrompt,
+  adHocDirectionBlock,
   CREATE_PROPOSAL_TOOL_DESCRIPTION,
   type DiscussionMessage,
   discussionPrompt,
   exclusionDigest,
   planningAgentPrompt,
   type ProposalShaping,
-  steeringBlock,
-  steeringChatPrompt,
   synthesisPrompt,
   UPDATE_PROPOSAL_TOOL_DESCRIPTION,
-} from './prompts';
-import { appendPlanningMemory, readSettings } from './settings';
+} from '@/server/planning/prompts';
+import { readPromptTemplate } from '@/server/knowledge/prompt-templates';
+import { appendPlanningMemory, readSettings } from '@/server/knowledge/settings';
 
-export type { DiscussionMessage } from './prompts';
+export type { DiscussionMessage } from '@/server/planning/prompts';
 
 /**
  * Planning passes: run the principal-engineer and product-manager agents in
@@ -33,14 +36,8 @@ export type { DiscussionMessage } from './prompts';
  * store, run state, auto-run scheduler — is per repo, keyed by repo id.
  */
 
-/** Planning persona definition files, relative to the repo root. */
-const PERSONA_FILES = {
-  engineer: '.claude/agents/principal-engineer.md',
-  pm: '.claude/agents/product-manager.md',
-} as const;
-
 function planningFile(repoPath: string): string {
-  return path.join(repoPath, '.orchestrator', 'planning.json');
+  return path.join(dataDir(repoPath), 'planning.json');
 }
 
 interface RepoPlanningState {
@@ -103,21 +100,32 @@ export interface PlanningConfig {
   maxEffort: number;
   /** Free-text focus topics to steer the plan toward (<= MAX_PLANNING_TOPICS). */
   topics: string[];
-  /** Agent (`.claude/agents/` name) filling the PE role; null = default principal-engineer.md. */
+  /** Agent (`.claude/agents/` name) filling the PE role; null = unassigned (passes refuse to run). */
   peAgent: string | null;
-  /** Agent name filling the PM role; null = default product-manager.md. */
+  /** Agent name filling the PM role; null = unassigned (passes refuse to run). */
   pmAgent: string | null;
-  /** Agent name that maintains the repo's product brief; null = none. */
+  /** Agent name that maintains the repo's product brief; null = none (product-map bootstrap disabled). */
   briefAgent: string | null;
+  /** Model planning sessions run on (falls back to Opus when its quota is hit). */
+  planningModel: string;
+}
+
+/** Last product-map bootstrap run for a repo (persisted in planning.json). */
+export interface ProductMapRun {
+  status: 'running' | 'done' | 'failed';
+  finishedAt?: string;
+  error?: string;
 }
 
 interface PlanningStore extends PlanningConfig {
   passes: PlanningPass[];
-  /** Pass-level steering chat — the developer's direction for the next pass. */
+  /** Ad-hoc planning chat — the developer's direction for the next ad-hoc pass. */
   steering: DiscussionMessage[];
+  /** Last product-map bootstrap run, if any. */
+  productMapRun?: ProductMapRun;
 }
 
-/** Keep the steering transcript bounded so it can't grow the prompt without limit. */
+/** Keep the ad-hoc planning transcript bounded so it can't grow the prompt without limit. */
 const MAX_STEERING_MESSAGES = 40;
 
 function sanitizeSteering(value: unknown): DiscussionMessage[] {
@@ -134,6 +142,10 @@ function sanitizeSteering(value: unknown): DiscussionMessage[] {
     .slice(-MAX_STEERING_MESSAGES);
 }
 
+/** Planning runs on Fable by default; when the configured model's usage limit is hit, fall back to Opus. */
+const DEFAULT_PLANNING_MODEL = 'claude-fable-5';
+const PLANNING_FALLBACK_MODEL = 'claude-opus-5';
+
 /** Config defaults — automation off, mid impact/effort thresholds, no topic focus. */
 const CONFIG_DEFAULTS: PlanningConfig = {
   intervalHours: null,
@@ -147,6 +159,7 @@ const CONFIG_DEFAULTS: PlanningConfig = {
   peAgent: null,
   pmAgent: null,
   briefAgent: null,
+  planningModel: DEFAULT_PLANNING_MODEL,
 };
 
 /** Trim an agent-name assignment; empty -> null. Existence is checked at pass start. */
@@ -195,6 +208,7 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       autonomous?: boolean;
       passes?: PlanningPass[];
       steering?: unknown;
+      productMapRun?: ProductMapRun;
     };
     const legacyAutonomous = parsed.autonomous ?? false;
     return {
@@ -209,8 +223,13 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       peAgent: sanitizeAgentName(parsed.peAgent),
       pmAgent: sanitizeAgentName(parsed.pmAgent),
       briefAgent: sanitizeAgentName(parsed.briefAgent),
+      // A retired model id in the store falls back to the default silently.
+      planningModel: isKnownModel(parsed.planningModel)
+        ? parsed.planningModel
+        : DEFAULT_PLANNING_MODEL,
       passes: parsed.passes ?? [],
       steering: sanitizeSteering(parsed.steering),
+      ...(parsed.productMapRun ? { productMapRun: parsed.productMapRun } : {}),
     };
   } catch {
     return { ...CONFIG_DEFAULTS, passes: [], steering: [] };
@@ -271,9 +290,15 @@ export async function ensurePlanningScheduler(repo: RepoInfo): Promise<void> {
 
 /** Per-repo planning config, with defaults filled in. */
 export async function getPlanningConfig(repo: RepoInfo): Promise<PlanningConfig> {
-  const { passes: _passes, steering: _steering, ...config } = await loadStore(repo.path);
+  const {
+    passes: _passes,
+    steering: _steering,
+    productMapRun: _productMapRun,
+    ...config
+  } = await loadStore(repo.path);
   void _passes;
   void _steering;
+  void _productMapRun;
   return config;
 }
 
@@ -299,6 +324,10 @@ export async function setPlanningConfig(
   if (patch.peAgent !== undefined) store.peAgent = sanitizeAgentName(patch.peAgent);
   if (patch.pmAgent !== undefined) store.pmAgent = sanitizeAgentName(patch.pmAgent);
   if (patch.briefAgent !== undefined) store.briefAgent = sanitizeAgentName(patch.briefAgent);
+  if (patch.planningModel !== undefined)
+    store.planningModel = isKnownModel(patch.planningModel)
+      ? patch.planningModel
+      : DEFAULT_PLANNING_MODEL;
 
   await saveStore(repo.path, store);
   if (intervalChanged) await ensurePlanningScheduler(repo);
@@ -343,10 +372,6 @@ const readOnlyCanUseTool: CanUseTool = async (toolName, input) => {
   };
 };
 
-/** Planning runs on Fable; when its usage limit is hit, fall back to Opus. */
-const PLANNING_MODEL = 'claude-fable-5';
-const PLANNING_FALLBACK_MODEL = 'claude-opus-5';
-
 function isUsageLimitError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /limit|quota|overloaded|exhausted|insufficient|credit/i.test(message);
@@ -355,19 +380,20 @@ function isUsageLimitError(err: unknown): boolean {
 /** A single captured activity line, role-tagged later by the caller. */
 type LogEvent = { kind: PlanningLogLine['kind']; text: string };
 
-/** Run one query on the primary planning model, retrying once on Opus if limited. */
+/** Run one query on the configured planning model, retrying once on Opus if limited. */
 async function runPlanningQuery(
   repoPath: string,
   prompt: string,
   extras?: Parameters<typeof runQuery>[3],
   onEvent?: (event: LogEvent) => void
 ): Promise<string> {
+  const { planningModel } = await loadStore(repoPath);
   try {
-    return await runQuery(repoPath, prompt, PLANNING_MODEL, extras, onEvent);
+    return await runQuery(repoPath, prompt, planningModel, extras, onEvent);
   } catch (err) {
     if (!isUsageLimitError(err)) throw err;
     console.warn(
-      `[orchestrator] planning: ${PLANNING_MODEL} limited, falling back to ${PLANNING_FALLBACK_MODEL}`
+      `[orchestrator] planning: ${planningModel} limited, falling back to ${PLANNING_FALLBACK_MODEL}`
     );
     return runQuery(repoPath, prompt, PLANNING_FALLBACK_MODEL, extras, onEvent);
   }
@@ -393,6 +419,8 @@ async function runQuery(
       permissionMode: 'default',
       canUseTool: readOnlyCanUseTool,
       systemPrompt: { type: 'preset', preset: 'claude_code' },
+      // Repo rules only — never the developer's user-level settings.
+      settingSources: ['project'],
       persistSession: false,
       ...(extras?.mcpServers ? { mcpServers: extras.mcpServers } : {}),
       ...(extras?.allowedTools ? { allowedTools: extras.allowedTools } : {}),
@@ -436,7 +464,8 @@ async function runPlanningAgent(
   exclusions: string,
   shaping: ProposalShaping,
   planningMemory: string,
-  steering: string,
+  adHocDirection: string,
+  template: string,
   onEvent?: (event: LogEvent) => void,
   abortController?: AbortController
 ): Promise<string> {
@@ -444,37 +473,43 @@ async function runPlanningAgent(
   const body = definition.replace(/^---[\s\S]*?---\s*/, '');
   return runPlanningQuery(
     repoPath,
-    planningAgentPrompt(body, exclusions, shaping, planningMemory, steering),
+    planningAgentPrompt(body, exclusions, shaping, planningMemory, adHocDirection, template),
     abortController ? { abortController } : undefined,
     onEvent
   );
 }
 
 /**
- * Resolve the persona definition file for a role. Uses the agent assigned in
- * config (Settings → Agents) if set — looked up by its `.claude/agents/` name —
- * otherwise the built-in default (principal-engineer.md / product-manager.md).
- * Returns the absolute path and a human label for error messages.
+ * Resolve the persona definition file for a role. There are NO built-in
+ * defaults: the role's agent must be assigned in config (Settings → Agents),
+ * looked up by its `.claude/agents/` name via listRepoAgents (only agents
+ * declaring a frontmatter `name` are eligible). Returns the absolute path and
+ * a human label for error messages; throws when the role is unassigned.
  */
 async function resolvePersonaFile(
   repo: RepoInfo,
   role: PlanningRole,
   config: PlanningConfig
-): Promise<{ path: string; label: string }> {
+): Promise<{ path: string | null; label: string }> {
   const assigned = role === 'engineer' ? config.peAgent : config.pmAgent;
-  if (assigned) {
-    const agent = (await listRepoAgents(repo.path)).find(
-      (a) => a.name.toLowerCase() === assigned.toLowerCase()
+  if (!assigned) {
+    throw new Error(
+      'Assign the PE and PM planning agents in Settings → Agents before running a pass'
     );
-    const file = agent ? agent.file : `${assigned}.md`;
-    return { path: path.join(repo.path, '.claude', 'agents', file), label: `agent "${assigned}"` };
   }
-  return { path: path.join(repo.path, PERSONA_FILES[role]), label: PERSONA_FILES[role] };
+  const agent = (await listRepoAgents(repo.path)).find(
+    (a) => a.name.toLowerCase() === assigned.toLowerCase()
+  );
+  return {
+    path: agent ? path.join(repo.path, '.claude', 'agents', agent.file) : null,
+    label: `agent "${assigned}"`,
+  };
 }
 
 /**
  * Resolve + validate the persona files for the requested roles before a pass
- * can run. Throws naming any missing ones (surfaced on the Planning page).
+ * can run. Throws when a role has no assigned agent, and names any assigned
+ * agents that no longer exist in the repo (surfaced on the Planning page).
  */
 async function requirePersonaFiles(
   repo: RepoInfo,
@@ -485,6 +520,10 @@ async function requirePersonaFiles(
   const missing: string[] = [];
   for (const role of roles) {
     const { path: p, label } = await resolvePersonaFile(repo, role, config);
+    if (p === null) {
+      missing.push(label);
+      continue;
+    }
     paths[role] = p;
     try {
       await fsp.access(p);
@@ -566,10 +605,12 @@ function parseProposals(raw: string): PlanningProposal[] {
  * Kick off a planning pass for a repo (engineer + PM in parallel, then synthesis).
  * `auto` marks a scheduler-triggered pass: on completion, if the repo is in
  * autonomous mode, its top-ranked proposals are auto-filed as issues.
+ * `adHoc` marks a developer-driven ad-hoc pass: ONLY those inject the ad-hoc
+ * planning chat transcript — scheduled/auto and plain manual passes run unsteered.
  */
 export async function startPlanningPass(
   repo: RepoInfo,
-  options: { auto?: boolean; roles?: PlanningRole[] } = {}
+  options: { auto?: boolean; roles?: PlanningRole[]; adHoc?: boolean } = {}
 ): Promise<string> {
   const g = planningState(repo.id);
   if (g.running) throw new Error('A planning pass is already running');
@@ -586,8 +627,13 @@ export async function startPlanningPass(
   const personas = await requirePersonaFiles(repo, roles, store);
   // Prioritization guidance the personas learn from (dismiss reasons + hand edits).
   const { planningMemory } = await readSettings(repo.path);
-  // The developer's steering chat, if any — direction for THIS pass.
-  const steering = steeringBlock(store.steering);
+  // The developer's ad-hoc planning chat — injected ONLY into ad-hoc passes.
+  const adHocDirection = options.adHoc ? adHocDirectionBlock(store.steering) : '';
+  // Admin-editable templates (Settings → Prompts) for the persona and synthesis prompts.
+  const [agentTemplate, synthesisTemplate] = await Promise.all([
+    readPromptTemplate('agents-planning'),
+    readPromptTemplate('synthesis'),
+  ]);
   g.running = true;
   g.cancelled = false;
   const abort = new AbortController();
@@ -644,7 +690,8 @@ export async function startPlanningPass(
             exclusions,
             shaping,
             planningMemory,
-            steering,
+            adHocDirection,
+            agentTemplate,
             record(role),
             abort
           );
@@ -659,7 +706,8 @@ export async function startPlanningPass(
             exclusions,
             shaping,
             planningMemory,
-            steering
+            adHocDirection,
+            synthesisTemplate
           ),
           { abortController: abort },
           record('synthesis')
@@ -784,19 +832,20 @@ export async function dismissProposals(
 }
 
 // ---------------------------------------------------------------------------
-// Steering chat (the pass-level chat on the planning page)
+// Ad-hoc planning chat (the pass-level chat on the planning page)
 //
-// A cheap conversational turn that shapes WHAT the next pass looks for. It
-// never writes proposals — those come only from a regenerated pass, which
-// injects this transcript into the PE/PM and synthesis prompts.
+// A cheap conversational turn that shapes WHAT the next ad-hoc pass looks for.
+// It never writes proposals — those come only from a regenerated pass started
+// with adHoc: true, which injects this transcript into the PE/PM and synthesis
+// prompts.
 // ---------------------------------------------------------------------------
 
-/** The stored steering transcript for a repo. */
+/** The stored ad-hoc planning transcript for a repo. */
 export async function getPlanningSteering(repo: RepoInfo): Promise<DiscussionMessage[]> {
   return (await loadStore(repo.path)).steering;
 }
 
-/** Replace the steering transcript (used to clear it). */
+/** Replace the ad-hoc planning transcript (used to clear it). */
 export async function setPlanningSteering(
   repo: RepoInfo,
   messages: DiscussionMessage[]
@@ -808,8 +857,8 @@ export async function setPlanningSteering(
 }
 
 /**
- * One steering turn: append the developer's message, get a reply, persist both.
- * Returns the full transcript so the client stays in sync.
+ * One ad-hoc planning chat turn: append the developer's message, get a reply,
+ * persist both. Returns the full transcript so the client stays in sync.
  */
 export async function sendPlanningSteering(
   repo: RepoInfo,
@@ -823,9 +872,25 @@ export async function sendPlanningSteering(
   const next: DiscussionMessage[] = [...store.steering, { role: 'user', text }];
   const reply = await runPlanningQuery(
     repo.path,
-    steeringChatPrompt(goal, currentProposals, next)
+    adHocChatPrompt(goal, currentProposals, next, await readPromptTemplate('adhoc-chat'))
   );
   return setPlanningSteering(repo, [...next, { role: 'assistant', text: reply }]);
+}
+
+// ---------------------------------------------------------------------------
+// Product-map bootstrap state (the run itself lives in ./product-map.ts)
+// ---------------------------------------------------------------------------
+
+/** Last product-map bootstrap run, or null if never run. */
+export async function getProductMapState(repo: RepoInfo): Promise<ProductMapRun | null> {
+  return (await loadStore(repo.path)).productMapRun ?? null;
+}
+
+/** Persist the product-map bootstrap run state (called by the runner). */
+export async function setProductMapRun(repoPath: string, run: ProductMapRun): Promise<void> {
+  const store = await loadStore(repoPath);
+  store.productMapRun = run;
+  await saveStore(repoPath, store);
 }
 
 // ---------------------------------------------------------------------------
@@ -937,10 +1002,14 @@ export async function discussProposal(
     ],
   });
 
-  const reply = await runPlanningQuery(repo.path, discussionPrompt(proposal, goal, messages), {
-    mcpServers: { orchestrator: tools },
-    allowedTools: ['mcp__orchestrator__update_proposal', 'mcp__orchestrator__create_proposal'],
-  });
+  const reply = await runPlanningQuery(
+    repo.path,
+    discussionPrompt(proposal, goal, messages, await readPromptTemplate('proposal-discussion')),
+    {
+      mcpServers: { orchestrator: tools },
+      allowedTools: ['mcp__orchestrator__update_proposal', 'mcp__orchestrator__create_proposal'],
+    }
+  );
 
   // Persist the full transcript (incoming turns + this reply) onto the proposal
   // so it survives refresh/navigation. updatePass reloads the store, so this is

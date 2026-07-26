@@ -5,13 +5,19 @@
  * This builds only the wrapper prompt. The persona's own instructions come from
  * the repo's `.claude/agents/*.md` file (read at runtime in planning.ts and
  * passed in as `personaBody`), and the exclusion digest is built in
- * ./planning-exclusions.
+ * ./exclusions.
+ *
+ * The static wording lives in DEFAULT_AGENTS_PLANNING_TEMPLATE so the admin can
+ * override it wholesale from Settings → Prompts; the builder pre-renders every
+ * dynamic block (shaping constraints, ad-hoc direction, planning memory,
+ * exclusions) into plain string vars for the template.
  */
 
-import type { ProposalShaping } from './planning-synthesis';
+import { renderTemplate } from '@/server/core/render';
+import type { ProposalShaping } from '@/server/planning/prompts/synthesis';
 
-/** Steering lines injected into the agent preamble from the plan config. */
-function steeringLines(shaping: ProposalShaping): string {
+/** Constraint lines injected into the agent preamble from the plan config. */
+function shapingLines(shaping: ProposalShaping): string {
   const lines: string[] = [];
   if (shaping.topics.length > 0) {
     lines.push(
@@ -43,28 +49,34 @@ function planningMemoryBlock(planningMemory: string): string {
   ].join('\n');
 }
 
+export const DEFAULT_AGENTS_PLANNING_TEMPLATE = `Run a planning pass NOW on the repository you are in. Follow the role instructions below exactly. Do not edit anything and do not create issues — return your ranked proposals as your final message, in the output format the instructions specify.
+
+{{shaping}}
+
+{{adHocDirection}}
+
+{{planningMemory}}
+
+{{exclusions}}
+
+---
+
+{{personaBody}}`;
+
 export function planningAgentPrompt(
   personaBody: string,
   exclusions: string,
   shaping: ProposalShaping,
   planningMemory: string,
-  steering: string
+  adHocDirection: string,
+  template?: string
 ): string {
-  const preamble = [
-    'Run a planning pass NOW on the repository you are in.',
-    'Follow the role instructions below exactly. Do not edit anything and do not',
-    'create issues — return your ranked proposals as your final message, in the',
-    'output format the instructions specify.',
-  ].join(' ');
-  const sections = [
-    preamble,
-    steeringLines(shaping),
-    // The developer's own direction for this pass outranks the standing config.
-    steering,
-    planningMemoryBlock(planningMemory),
+  return renderTemplate(template ?? DEFAULT_AGENTS_PLANNING_TEMPLATE, {
+    shaping: shapingLines(shaping),
+    // The developer's own ad-hoc direction for this pass outranks the standing config.
+    adHocDirection,
+    planningMemory: planningMemoryBlock(planningMemory),
     exclusions,
-    '---',
     personaBody,
-  ].filter(Boolean);
-  return sections.join('\n\n');
+  });
 }

@@ -1,12 +1,13 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { dataDir } from '@/server/core/data-dir';
 import type { LogEvent, Task } from '@/lib/types';
 
 /**
  * Orchestrator state store (per managed repo).
  *
- * Persistent state lives in <repoPath>/.orchestrator/state.json; per-issue JSONL
- * logs in <repoPath>/.orchestrator/logs/issue-{n}.jsonl (both git-ignored).
+ * Persistent state lives in <repoPath>/.claude-hydra/state.json; per-issue JSONL
+ * logs in <repoPath>/.claude-hydra/logs/issue-{n}.jsonl (both git-ignored).
  *
  * The in-memory stores (one per repo path) + subscriber sets are lazily
  * initialized behind a globalThis guard so Next dev hot-reload doesn't
@@ -54,7 +55,7 @@ function store(repoPath: string): StateGlobal {
 }
 
 function orchDir(repoPath: string): string {
-  return path.join(repoPath, '.orchestrator');
+  return dataDir(repoPath);
 }
 
 function stateFile(repoPath: string): string {
@@ -213,7 +214,7 @@ export function subscribe(repoPath: string, listener: (tasks: Task[]) => void): 
   };
 }
 
-/** Append one event to <repoPath>/.orchestrator/logs/issue-{n}.jsonl and notify log streams. */
+/** Append one event to <repoPath>/.claude-hydra/logs/issue-{n}.jsonl and notify log streams. */
 export async function appendLog(
   repoPath: string,
   issueNumber: number,

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { clearProposalDiscussion, discussProposal, type DiscussionMessage } from '@/server/planning';
+import { clearProposalDiscussion, discussProposal, type DiscussionMessage } from '@/server/planning/planning';
 
 function isMessage(value: unknown): value is DiscussionMessage {
   const m = value as DiscussionMessage;

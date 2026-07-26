@@ -1,4 +1,3 @@
-import path from 'node:path';
 import {
   createSdkMcpServer,
   query,
@@ -13,23 +12,32 @@ import type {
 import { z } from 'zod';
 import { DEFAULT_EXECUTION_MODEL } from '@/lib/models';
 import type { LogEvent, RepoInfo, Task } from '@/lib/types';
+import type { OutcomeMapper, SessionOutcome } from '@/server/execution/flows/types';
 import {
   ASK_USER_QUESTION_DESCRIPTION,
   ASK_USER_TOOL_DESCRIPTION,
-  buildPrompt,
-  SAVE_MEMORY_LESSON_DESCRIPTION,
-  SAVE_MEMORY_TOOL_DESCRIPTION,
-} from './prompts';
-import { appendMemory, readSettings } from './settings';
+} from '@/server/execution/prompts';
 
 /**
- * Agent session runtime, backed by the TypeScript Claude Agent SDK
- * (@anthropic-ai/claude-agent-sdk).
+ * Agent session RUNTIME, backed by the TypeScript Claude Agent SDK
+ * (@anthropic-ai/claude-agent-sdk). Pure mechanics: launch a prompt in a
+ * worktree, stream events, keep the session alive across ask_user pauses, and
+ * report how it ended.
+ *
+ * FLOW-AGNOSTIC BY DESIGN: what a session is FOR (implementing an issue,
+ * resolving PR conflicts, …) lives in src/server/flows/*. A flow hands
+ * startSession the finished prompt and an OutcomeMapper; the runtime never
+ * branches on flow kind.
  *
  * Sessions are fire-and-forget but may ask ONE-turn questions: the session pauses
  * (task status 'needs_input') until replySession() delivers the user's answer, then
- * resumes with full context. Agents run lint + unit tests only (never e2e, never
- * migrations); `gh pr create` is allowed; deploy/prod commands are denied.
+ * resumes with full context.
+ *
+ * POLICY LIVES IN THE REPO, NOT HERE. Hydra only manages the session lifecycle;
+ * what an agent may or may not do is governed by the managed repo's own rules —
+ * CLAUDE.md, .claude/settings.json permissions (loaded via settingSources:
+ * ['project'] and enforced by the SDK), skills, and agents. Hydra auto-approves
+ * whatever the repo's rules don't decide, so sessions never hang on a prompt.
  *
  * The live-session registry is lazily initialized behind a globalThis guard so
  * Next dev hot-reload doesn't duplicate running sessions.
@@ -99,17 +107,6 @@ function createInputQueue(): InputQueue {
 // globalThis-guarded registry
 // ---------------------------------------------------------------------------
 
-/**
- * The pre-commit review gate for one session. `required` is the configured
- * reviewer subagent names (lowercased); `seen` are the ones actually invoked
- * via the Task tool this session. `git commit` is denied until seen ⊇ required.
- * Empty `required` = no gate.
- */
-interface ReviewGate {
-  required: Set<string>;
-  seen: Set<string>;
-}
-
 interface LiveSession {
   repo: RepoInfo;
   issueNumber: number;
@@ -118,6 +115,8 @@ interface LiveSession {
   /** Resolver for a pending ask_user tool call; non-null while status is needs_input. */
   pendingReply: ((answer: string) => void) | null;
   stopped: boolean;
+  /** The owning flow's outcome mapping (terminal status + result log). */
+  mapOutcome: OutcomeMapper;
   prUrl?: string;
   prNumber?: number;
 }
@@ -181,195 +180,17 @@ function scanForPrUrl(live: LiveSession, text: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Permission policy: allow everything programmatically (no interactive
-// prompts), but deny deploy/prod Bash commands, credential reads, and
-// non-GitHub network egress with a refusal message the agent can recover from.
+// Permissions: Hydra decides NOTHING. The repo's own .claude/settings.json
+// deny/allow rules (loaded via settingSources: ['project']) are evaluated by
+// the SDK before this callback ever runs — a repo deny rule blocks the call
+// outright. Whatever the repo's rules leave undecided is auto-approved here so
+// a headless session never hangs waiting for an interactive prompt.
 // ---------------------------------------------------------------------------
 
-const DENIED_BASH_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
-  { pattern: /\bterraform\b/, reason: 'terraform commands' },
-  { pattern: /\baws\s/, reason: 'aws CLI commands' },
-  { pattern: /db-migrate-prod/, reason: 'production database migrations' },
-  // Prod DB access: any RDS endpoint, or psql pointed at a non-local host.
-  { pattern: /rds\.amazonaws\.com/, reason: 'production (RDS) database connections' },
-  {
-    pattern: /\bpsql\b[^&|;\n]*\s(-h|--host)[=\s]*(?!(localhost|127\.0\.0\.1)\b)\S+/,
-    reason: 'psql connections to remote hosts',
-  },
-  { pattern: /\bdocker\s+push\b/, reason: 'docker push' },
-  // Workflow dispatch/re-run in every gh spelling, not just `gh workflow run`.
-  { pattern: /\bgh\s+workflow\s+run\b/, reason: 'workflow dispatch' },
-  {
-    pattern: /\bgh\s+api\b[^&|;\n]*\bdispatches\b/,
-    reason: 'workflow dispatch via gh api',
-  },
-  { pattern: /\bgh\s+run\s+rerun\b/, reason: 'workflow re-runs' },
-  // ALL git pushes: agents commit locally only; the developer pushes from the
-  // dashboard. Tolerates intervening args (`git -C dir push`).
-  {
-    pattern: /\bgit\b[^&|;\n]*\bpush\b/,
-    reason: 'git push (the developer pushes from the dashboard)',
-  },
-  { pattern: /\bgh\s+pr\s+create\b/, reason: 'gh pr create (the developer opens the PR from the dashboard)' },
-  // Force pushes: tolerate intervening args (`git -C dir push`), and catch the
-  // `+refspec` form which forces without any --force/-f flag.
-  {
-    pattern:
-      /\bgit\b[^&|;\n]*\bpush\b[^&|;\n]*(\s(--force(-with-lease)?|-f)\b|\s\+\S)/,
-    reason: 'force pushes',
-  },
-  // Home-directory credential/config files (~/.aws, ~/.ssh, gh/claude tokens…).
-  {
-    pattern:
-      /(~|\$HOME\b|\$\{HOME\}|\/Users\/[^/\s"'`]+|\/home\/[^/\s"'`]+)\/\.(aws|ssh|netrc|gnupg|npmrc|docker|kube|config|claude)\b/,
-    reason: 'reads of home-directory credential files',
-  },
-  // Relative-path escapes to .env files (absolute paths handled per-session).
-  { pattern: /\.\.\/[^\s"'`;|&]*\.env/, reason: 'reads of .env files outside the worktree' },
-];
-
-const GITHUB_HOST_PATTERN = /^([\w-]+\.)*(github\.com|githubusercontent\.com)$/;
-
-/** Deny curl/wget unless every URL is an explicit GitHub host (no URL at all = deny: could be hidden in a variable). */
-function deniedNetworkReason(command: string): string | null {
-  if (!/\b(curl|wget)\b/.test(command)) return null;
-  const urls = command.match(/https?:\/\/[^\s"'`]+/g) ?? [];
-  if (urls.length === 0) {
-    return 'curl/wget commands without an explicit GitHub URL';
-  }
-  for (const url of urls) {
-    let host: string | null = null;
-    try {
-      host = new URL(url).hostname;
-    } catch {
-      host = null;
-    }
-    if (!host || !GITHUB_HOST_PATTERN.test(host)) {
-      return 'curl/wget requests to non-GitHub hosts';
-    }
-  }
-  return null;
-}
-
-/** Deny any absolute path to a .env* file that is not inside the worktree (repo-root .env.local holds real keys). */
-function deniedEnvPathReason(
-  command: string,
-  worktreePath: string
-): string | null {
-  const refs = command.match(/\/[^\s"'`;|&)]*\.env[\w.-]*/g) ?? [];
-  for (const ref of refs) {
-    if (!ref.startsWith(worktreePath + path.sep)) {
-      return 'reads of .env files outside the worktree';
-    }
-  }
-  return null;
-}
-
-function deniedBashReason(command: string, worktreePath: string): string | null {
-  const denied = DENIED_BASH_PATTERNS.find((d) => d.pattern.test(command));
-  if (denied) return denied.reason;
-  return (
-    deniedNetworkReason(command) ?? deniedEnvPathReason(command, worktreePath)
-  );
-}
-
-/** Tools that take a filesystem path we can confine to the worktree. */
-const FILE_PATH_TOOLS = new Set([
-  'Read',
-  'Write',
-  'Edit',
-  'MultiEdit',
-  'NotebookEdit',
-  'Glob',
-  'Grep',
-]);
-
-function isOutsideWorktree(rawPath: string, worktreePath: string): boolean {
-  const resolved = path.isAbsolute(rawPath)
-    ? path.resolve(rawPath)
-    : path.resolve(worktreePath, rawPath);
-  return resolved !== worktreePath && !resolved.startsWith(worktreePath + path.sep);
-}
-
-function makeCanUseTool(
-  repo: RepoInfo,
-  issueNumber: number,
-  worktreePath: string,
-  gate: ReviewGate
-): CanUseTool {
-  return async (toolName, input) => {
-    const deny = (reason: string, detail: string) => {
-      emit({ repo, issueNumber, log: makeLog('error', `Denied ${detail}`) });
-      return {
-        behavior: 'deny' as const,
-        message: `This was blocked by the orchestrator: ${reason} are not allowed in agent sessions. Do not retry it — continue the task without it.`,
-      };
-    };
-
-    // Record reviewer subagent invocations toward the pre-commit gate (allow all Task calls).
-    if (toolName === 'Task') {
-      const sub =
-        typeof input.subagent_type === 'string' ? input.subagent_type.trim().toLowerCase() : '';
-      if (sub && gate.required.has(sub)) gate.seen.add(sub);
-      return { behavior: 'allow', updatedInput: input };
-    }
-
-    if (toolName === 'Bash') {
-      const command = typeof input.command === 'string' ? input.command : '';
-
-      // Hard gate: block `git commit` until every configured reviewer has run.
-      // NOTE: a bespoke message (not deny()) — we WANT a retry after reviewing.
-      if (gate.required.size > 0 && GIT_COMMIT_PATTERN.test(command)) {
-        const missing = [...gate.required].filter((name) => !gate.seen.has(name));
-        if (missing.length > 0) {
-          emit({
-            repo,
-            issueNumber,
-            log: makeLog('error', `Blocked git commit — reviews pending: ${missing.join(', ')}`),
-          });
-          return {
-            behavior: 'deny',
-            message:
-              `Blocked by the orchestrator: mandatory code review is not complete. ` +
-              `Run the ${missing.map((m) => `"${m}"`).join(' and ')} review${
-                missing.length === 1 ? '' : 's'
-              } first via the Task tool (subagent_type = the agent name), apply the findings, ` +
-              `then retry the commit. This is required — do not work around it.`,
-          };
-        }
-      }
-
-      const reason = deniedBashReason(command, worktreePath);
-      if (reason) return deny(reason, `command: ${oneLine(command)}`);
-    } else if (FILE_PATH_TOOLS.has(toolName)) {
-      const rawPath = [input.file_path, input.path, input.notebook_path].find(
-        (value): value is string => typeof value === 'string'
-      );
-      if (rawPath && isOutsideWorktree(rawPath, worktreePath)) {
-        return deny(
-          'file accesses outside the worktree',
-          `${toolName} outside worktree: ${oneLine(rawPath)}`
-        );
-      }
-    } else if (toolName === 'WebFetch') {
-      // Same egress rule as curl/wget: GitHub hosts only.
-      const url = typeof input.url === 'string' ? input.url : '';
-      let host: string | null = null;
-      try {
-        host = new URL(url).hostname;
-      } catch {
-        host = null;
-      }
-      if (!host || !GITHUB_HOST_PATTERN.test(host)) {
-        return deny(
-          'web fetches to non-GitHub hosts',
-          `WebFetch: ${oneLine(url)}`
-        );
-      }
-    }
-    return { behavior: 'allow', updatedInput: input };
-  };
-}
+const autoApprove: CanUseTool = async (_toolName, input) => ({
+  behavior: 'allow',
+  updatedInput: input,
+});
 
 // ---------------------------------------------------------------------------
 // SDK message → LogEvent mapping
@@ -396,8 +217,8 @@ function logForToolUse(
   name: string,
   input: Record<string, unknown>
 ): LogEvent | null {
-  if (name === 'mcp__orchestrator__ask_user' || name === 'mcp__orchestrator__save_memory') {
-    return null; // these tool handlers emit their own log events
+  if (name === 'mcp__orchestrator__ask_user') {
+    return null; // the ask_user handler emits its own log events
   }
   if (name === 'Bash') {
     const command = oneLine(typeof input.command === 'string' ? input.command : '');
@@ -503,21 +324,14 @@ function handleMessage(live: LiveSession, message: SDKMessage): void {
         turns: message.num_turns,
         costUsd: message.total_cost_usd,
       };
-      let log: LogEvent;
-
+      // Build the neutral outcome; the owning flow decides what it MEANS.
+      let outcome: SessionOutcome;
       if (message.subtype === 'success' && !message.is_error) {
         scanForPrUrl(live, message.result);
-        if (live.prUrl) {
-          patch.status = 'pr_open';
-          patch.prUrl = live.prUrl;
-          patch.prNumber = live.prNumber;
-          log = makeLog('result', `PR opened: ${live.prUrl}`);
-        } else {
-          // Agents never push — a clean finish means the work is committed in
-          // the worktree, awaiting the developer's push from the dashboard.
-          patch.status = 'committed';
-          log = makeLog('result', 'Work committed locally — push & open the PR from the dashboard');
-        }
+        outcome = {
+          success: true,
+          ...(live.prUrl ? { prUrl: live.prUrl, prNumber: live.prNumber } : {}),
+        };
       } else {
         const errorText =
           message.subtype === 'success'
@@ -526,10 +340,11 @@ function handleMessage(live: LiveSession, message: SDKMessage): void {
                 [message.subtype, ...(message.errors ?? [])].join(': '),
                 500
               );
-        patch.status = 'failed';
-        patch.error = errorText;
-        log = makeLog('error', `Session failed: ${errorText}`);
+        outcome = { success: false, errorText };
       }
+      const mapping = live.mapOutcome(outcome);
+      Object.assign(patch, mapping.patch);
+      const log = makeLog(mapping.logKind, mapping.logText);
 
       emit({ repo, issueNumber, log, patch });
       // The turn is over and the task is terminal (pr_open/committed/failed).
@@ -549,16 +364,30 @@ function handleMessage(live: LiveSession, message: SDKMessage): void {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Start an agent session for an issue inside its worktree. Resolves once the session is launched (fire-and-forget). */
-export async function startSession(
-  repo: RepoInfo,
-  issueNumber: number,
-  worktreePath: string,
-  branch: string,
-  model?: string,
-  useWorkflow = false,
-  reviewerAgents: string[] = []
-): Promise<void> {
+/** Everything the runtime needs to launch one session — supplied by a flow. */
+export interface StartSessionOptions {
+  repo: RepoInfo;
+  issueNumber: number;
+  worktreePath: string;
+  branch: string;
+  /** Model id; falls back to the app default when absent. */
+  model?: string;
+  /** The finished task prompt, built by the owning flow. */
+  taskPrompt: string;
+  /** The owning flow's mapping of the session's end to task status + log. */
+  mapOutcome: OutcomeMapper;
+  /** Launch log line (flow-specific wording). */
+  launchLog: string;
+}
+
+/**
+ * Launch one agent session inside its worktree. Resolves once the session is
+ * running (fire-and-forget). Flow-agnostic: callers are the flow modules
+ * (src/server/flows/*), which supply the prompt and the outcome mapping.
+ */
+export async function startSession(options: StartSessionOptions): Promise<void> {
+  const { repo, issueNumber, worktreePath, branch, model, taskPrompt, mapOutcome, launchLog } =
+    options;
   const { sessions } = registry();
   const key = sessionKey(repo.id, issueNumber);
   if (sessions.has(key)) {
@@ -566,20 +395,6 @@ export async function startSession(
   }
 
   const input = createInputQueue();
-  const { goal, memory } = await readSettings(repo.path);
-  const gate: ReviewGate = {
-    required: new Set(reviewerAgents.map((name) => name.trim().toLowerCase())),
-    seen: new Set<string>(),
-  };
-  const taskPrompt = buildPrompt(
-    issueNumber,
-    worktreePath,
-    branch,
-    goal,
-    memory,
-    useWorkflow,
-    reviewerAgents
-  );
   input.push({
     type: 'user',
     message: {
@@ -629,22 +444,6 @@ export async function startSession(
           return { content: [{ type: 'text', text: answer }] };
         }
       ),
-      tool(
-        'save_memory',
-        SAVE_MEMORY_TOOL_DESCRIPTION,
-        {
-          lesson: z.string().describe(SAVE_MEMORY_LESSON_DESCRIPTION),
-        },
-        async ({ lesson }) => {
-          await appendMemory(repo.path, issueNumber, lesson);
-          emit({
-            repo,
-            issueNumber,
-            log: makeLog('info', `Memory saved: ${oneLine(lesson, 200)}`),
-          });
-          return { content: [{ type: 'text', text: 'Lesson saved to shared memory.' }] };
-        }
-      ),
     ],
   });
 
@@ -655,13 +454,17 @@ export async function startSession(
       // Implementation defaults to Opus (per-task dropdown can override);
       // planning (PE/PM personas) runs on Fable.
       model: model ?? EXECUTION_MODEL,
-      // No interactive prompts: edits auto-accepted, everything else decided
-      // programmatically by canUseTool (allow-all except the deny patterns).
+      // No interactive prompts: edits auto-accepted, everything the repo's own
+      // permission rules don't decide is auto-approved (policy lives in the repo).
       permissionMode: 'acceptEdits',
-      canUseTool: makeCanUseTool(repo, issueNumber, worktreePath, gate),
+      canUseTool: autoApprove,
       systemPrompt: { type: 'preset', preset: 'claude_code' },
+      // Repo rules only: the worktree's CLAUDE.md, .claude/settings.json, and
+      // skills — never the developer's user-level settings (deterministic
+      // behavior across machines).
+      settingSources: ['project'],
       mcpServers: { orchestrator: askUserServer },
-      allowedTools: ['mcp__orchestrator__ask_user', 'mcp__orchestrator__save_memory'],
+      allowedTools: ['mcp__orchestrator__ask_user'],
       persistSession: false,
     },
   });
@@ -673,13 +476,14 @@ export async function startSession(
     input,
     pendingReply: null,
     stopped: false,
+    mapOutcome,
   };
   sessions.set(key, live);
 
   emit({
     repo,
     issueNumber,
-    log: makeLog('info', `Agent session launched on ${branch}`),
+    log: makeLog('info', launchLog),
     patch: {
       status: 'working',
       worktreePath,

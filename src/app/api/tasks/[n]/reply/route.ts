@@ -6,8 +6,8 @@ import {
   rejectNonLocal,
 } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { ensureLoopStarted } from '@/server/loop';
-import { replySession } from '@/server/sessions';
+import { ensureLoopStarted } from '@/server/loop/loop';
+import { replySession } from '@/server/execution/sessions';
 
 /**
  * POST /api/tasks/[n]/reply?repo=<id> {message} -> answer a session paused in

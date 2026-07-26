@@ -34,12 +34,6 @@ import {
 } from '@/components/shared/task-actions';
 import { useRepo } from '@/components/shared/use-repo';
 
-/** Planning persona file for each role, under .claude/agents/. */
-const PERSONA_FILE_BY_ROLE: Record<PlanningRole, string> = {
-  engineer: '.claude/agents/principal-engineer.md',
-  pm: '.claude/agents/product-manager.md',
-};
-
 const SOURCE_BADGE: Record<PlanningProposal['source'], { label: string; className: string }> = {
   engineer: { label: 'PE', className: 'bg-info-muted text-info' },
   pm: { label: 'PM', className: 'bg-warning-muted text-warning' },
@@ -298,10 +292,11 @@ export function PlanningPage() {
   const [busy, setBusy] = useState(false);
   const [filingPassId, setFilingPassId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  /** Planning config, to gate the run buttons on PE/PM assignment. */
+  const [cfg, setCfg] = useState<PlanningConfig | null>(null);
   // Pending dismissal awaiting an optional reason (fed back into planning memory).
   const [dismissing, setDismissing] = useState<{ passId: string; ids: string[] } | null>(null);
   const [dismissReason, setDismissReason] = useState('');
-  const [config, setConfig] = useState<PlanningConfig | null>(null);
   const [hidden, setHidden] = useState<ReadonlySet<ProposalStatus>>(readHiddenStatuses);
   const [steeringOpen, setSteeringOpen] = useState(false);
   const [discussing, setDiscussing] = useState<{ passId: string; proposalId: string } | null>(
@@ -316,12 +311,6 @@ export function PlanningPage() {
       .finally(() => setLoaded(true));
   }, [repoId]);
 
-  // Config drives which agents a Plan run uses and the missing-persona gating.
-  const loadConfig = useCallback(() => {
-    if (!repoId) return;
-    getPlanningConfig(repoId).then(setConfig).catch(() => {});
-  }, [repoId]);
-
   // Reset during render when the selected repo changes (React's derived-state
   // pattern), so the effect below only refetches.
   const [loadedRepoId, setLoadedRepoId] = useState(repoId);
@@ -331,12 +320,10 @@ export function PlanningPage() {
     setSelected(new Set());
     setDiscussing(null);
     setSteeringOpen(false);
-    setConfig(null);
     setLoaded(false);
   }
 
   useEffect(refresh, [refresh]);
-  useEffect(loadConfig, [loadConfig]);
 
   const latest = passes[0];
   const running = latest?.status === 'running';
@@ -392,14 +379,30 @@ export function PlanningPage() {
   const totalProposals = statusCounts.pending + statusCounts.filed + statusCounts.dismissed;
   const hiddenCount = [...hidden].reduce((sum, status) => sum + statusCounts[status], 0);
 
-  // Agents a Plan run uses come from the config (default both until it loads);
-  // passing none lets the server fall back to the configured roles.
-  const configRoles: PlanningRole[] = config?.roles ?? ['engineer', 'pm'];
-
-  const handleStart = () => {
+  useEffect(() => {
     if (!repoId) return;
+    getPlanningConfig(repoId).then(setCfg).catch(() => setCfg(null));
+  }, [repoId]);
+
+  /** The pass refuses to run without BOTH planning agents assigned (no defaults). */
+  const agentsAssigned = Boolean(cfg?.peAgent && cfg?.pmAgent);
+
+  // Scheduled-style manual run: no roles (server falls back to the configured
+  // scope) and NOT ad-hoc — only the chat drawer runs ad-hoc passes.
+  const handleStart = () => {
+    if (!repoId || !agentsAssigned) return;
     setBusy(true);
     startPlanningPass(repoId)
+      .then(refresh)
+      .catch(() => {})
+      .finally(() => setBusy(false));
+  };
+
+  /** Ad-hoc pass from the chat drawer — carries the transcript's direction. */
+  const handleAdHocStart = () => {
+    if (!repoId || !agentsAssigned) return;
+    setBusy(true);
+    startPlanningPass(repoId, { adHoc: true })
       .then(refresh)
       .catch(() => {})
       .finally(() => setBusy(false));
@@ -474,15 +477,6 @@ export function PlanningPage() {
     return <div className="p-6 text-sm text-muted-foreground">Loading planning passes…</div>;
   }
 
-  // Per-role persona presence (falls back to hasPersonas if the granular flag
-  // isn't on the repo yet), gated to the agents the config will run.
-  const personas = current?.personas ?? {
-    engineer: current?.hasPersonas ?? false,
-    pm: current?.hasPersonas ?? false,
-  };
-  const missingForScope = configRoles.filter((role) => !personas[role]);
-  const canPlan = missingForScope.length === 0;
-
   return (
     <div className="flex items-start gap-6 p-6">
       <div className="mx-auto flex w-full max-w-4xl min-w-0 flex-col gap-6">
@@ -496,7 +490,7 @@ export function PlanningPage() {
               setDiscussing(null); // one drawer at a time
             }}
             aria-pressed={steeringOpen}
-            title="Steer the next plan with Claude"
+            title="Ad-hoc planning with Claude"
             className={`inline-flex h-8 items-center gap-1.5 rounded-md border pl-2 pr-3 text-xs font-medium transition-colors ${
               steeringOpen
                 ? 'border-[#D97757]/50 bg-[#D97757]/15'
@@ -508,8 +502,9 @@ export function PlanningPage() {
           </button>
           <button
             type="button"
-            disabled={busy || running || !canPlan}
+            disabled={busy || running || !agentsAssigned}
             onClick={handleStart}
+            title={agentsAssigned ? undefined : 'Assign the PE and PM planning agents first'}
             className="inline-flex h-8 items-center rounded-md bg-primary px-4 text-xs font-semibold tracking-wide text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
             {running ? 'Planning…' : 'Plan'}
@@ -528,25 +523,23 @@ export function PlanningPage() {
         </div>
       </div>
 
-      {missingForScope.length > 0 && (
-        <div className="rounded-lg bg-warning-muted px-4 py-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-warning">
-            Planning persona{missingForScope.length > 1 ? 's' : ''} missing
-          </div>
-          <p className="mt-1 text-sm leading-snug">
-            The configured agents need{' '}
-            {missingForScope.map((role, i) => (
-              <span key={role}>
-                {i > 0 && ' and '}
-                <code className="font-mono text-[11px]">{PERSONA_FILE_BY_ROLE[role]}</code>
-              </span>
-            ))}
-            . Add {missingForScope.length > 1 ? 'them' : 'it'} to run, or change the agents in Config.
-          </p>
+      {cfg !== null && !agentsAssigned && (
+        <div className="rounded-lg border border-warning/40 bg-warning-muted/40 px-4 py-3 text-[13px] leading-relaxed">
+          <div className="font-semibold">Planning is disabled. Agents are not set.</div>
+          <ul className="mt-1.5 list-disc space-y-1 pl-5 text-muted-foreground">
+            {!cfg.peAgent && <li>No Principal Engineer agent assigned</li>}
+            {!cfg.pmAgent && <li>No Product Manager agent assigned</li>}
+          </ul>
+          <a
+            href={`/settings?repo=${encodeURIComponent(repoId ?? '')}&tab=agents`}
+            className="mt-2 inline-block font-medium underline underline-offset-2 hover:opacity-80"
+          >
+            Assign them in Settings → Agents
+          </a>
         </div>
       )}
 
-      {passes.length === 0 && canPlan && (
+      {passes.length === 0 && (
         <p className="text-sm text-muted-foreground">No planning passes yet — run the first one.</p>
       )}
 
@@ -723,9 +716,9 @@ export function PlanningPage() {
       {repoId && steeringOpen && !discussing && (
         <PlanningSteeringChat
           repoId={repoId}
-          onPlan={handleStart}
+          onPlan={handleAdHocStart}
           planning={running}
-          canPlan={canPlan && !busy}
+          canPlan={!busy && agentsAssigned}
           onClose={() => setSteeringOpen(false)}
         />
       )}

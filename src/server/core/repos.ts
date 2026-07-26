@@ -5,14 +5,15 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RepoInfo } from '@/lib/types';
+import { migrateLegacyDataDir } from '@/server/core/data-dir';
 
 /**
  * Repo registry — the list of local git repos this orchestrator manages.
  *
  * Persisted at <app-root>/data/repos.json (git-ignored) as {repos: [{id, name, path}]}.
- * Everything per-repo (state, logs, worktrees, goal/memory, planning) lives
- * inside each managed repo under .orchestrator/ and .worktrees/ — this file
- * only maps repo ids to checkout paths.
+ * Everything per-repo (state, logs, goal/memory, planning) lives inside each
+ * managed repo under .claude-hydra/ and .worktrees/ — this file only maps
+ * repo ids to checkout paths.
  *
  * Writes are atomic (temp file + rename), like state.ts. The registry is read
  * from disk on every access (it is tiny and rarely changes), so there is no
@@ -31,15 +32,12 @@ const REGISTRY_FILE = path.join(DATA_DIR, 'repos.json');
  */
 const LEGACY_REPO_PATH = '/Users/george-xon/Downloads/Git/nous-ai';
 
-/** Registry entry as stored on disk (hasPersonas is computed, never stored). */
+/** Registry entry as stored on disk (htmlUrl is computed, never stored). */
 interface RepoEntry {
   id: string;
   name: string;
   path: string;
 }
-
-/** Both planning persona files a repo needs under .claude/agents/. */
-const PERSONA_FILES = ['principal-engineer.md', 'product-manager.md'] as const;
 
 // ---------------------------------------------------------------------------
 // Registry persistence
@@ -104,19 +102,6 @@ async function readRegistry(): Promise<RepoEntry[]> {
   );
 }
 
-/** Which planning persona files exist under .claude/agents/ (engineer, pm). */
-async function personaPresence(repoPath: string): Promise<{ engineer: boolean; pm: boolean }> {
-  const [engineer, pm] = await Promise.all(
-    PERSONA_FILES.map((file) =>
-      fsp.access(path.join(repoPath, '.claude', 'agents', file)).then(
-        () => true,
-        () => false
-      )
-    )
-  );
-  return { engineer, pm };
-}
-
 /** Normalize a git remote URL (https or ssh form) to a GitHub web URL. */
 function remoteToHtmlUrl(remote: string): string | undefined {
   const trimmed = remote.trim().replace(/\.git$/, '');
@@ -138,16 +123,14 @@ async function originHtmlUrl(repoPath: string): Promise<string | undefined> {
   }
 }
 
-/** Entry + computed fields (hasPersonas, htmlUrl) as served by GET /api/repos. */
+/** Entry + computed fields (htmlUrl) as served by GET /api/repos. */
 async function toRepoInfo(entry: RepoEntry): Promise<RepoInfo> {
-  const [personas, htmlUrl] = await Promise.all([
-    personaPresence(entry.path),
-    originHtmlUrl(entry.path),
-  ]);
+  // Every code path reaches a repo through the registry, so this is the one
+  // place the legacy .orchestrator -> .claude-hydra migration needs to run.
+  await migrateLegacyDataDir(entry.path);
+  const htmlUrl = await originHtmlUrl(entry.path);
   return {
     ...entry,
-    personas,
-    hasPersonas: personas.engineer && personas.pm,
     ...(htmlUrl ? { htmlUrl } : {}),
   };
 }
@@ -156,7 +139,7 @@ async function toRepoInfo(entry: RepoEntry): Promise<RepoInfo> {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** All registered repos with hasPersonas computed (backs GET /api/repos). */
+/** All registered repos with computed fields (backs GET /api/repos). */
 export async function loadRepos(): Promise<RepoInfo[]> {
   const entries = await readRegistry();
   return Promise.all(entries.map(toRepoInfo));
@@ -250,7 +233,7 @@ export async function addRepo(inputPath: string, name?: string): Promise<RepoInf
 
 /**
  * Remove a repo from the registry only — never touches the repo's files
- * (.orchestrator/, .worktrees/ stay intact). Returns false on unknown id.
+ * (.claude-hydra/, .worktrees/ stay intact). Returns false on unknown id.
  */
 export async function removeRepo(id: string): Promise<boolean> {
   const entries = await readRegistry();

@@ -2,10 +2,10 @@ import { NextResponse } from 'next/server';
 import { errorResponse } from '@/lib/api';
 import { isNonAgentTask } from '@/lib/task-helpers';
 import type { OverviewSession, RepoOverview, Task, TaskStatus } from '@/lib/types';
-import { getExecutionConfig } from '@/server/execution';
-import { getPlanning } from '@/server/planning';
-import { loadRepos } from '@/server/repos';
-import { getTasks } from '@/server/state';
+import { getExecutionConfig } from '@/server/execution/config';
+import { getPlanning } from '@/server/planning/planning';
+import { loadRepos } from '@/server/core/repos';
+import { getTasks } from '@/server/state/state';
 
 /**
  * GET /api/overview -> RepoOverview[] — every registered repo's roll-up in one

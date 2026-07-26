@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, parseIssueNumber, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { setIssueStatus } from '@/server/loop';
+import { setIssueStatus } from '@/server/loop/loop';
 
 /** POST /api/tasks/[n]/status?repo=<id> {status} -> manually override a task's status. */
 export async function POST(

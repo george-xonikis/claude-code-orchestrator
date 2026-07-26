@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { errorResponse } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { ensureLoopStarted } from '@/server/loop';
-import { getTasks } from '@/server/state';
+import { ensureLoopStarted } from '@/server/loop/loop';
+import { getTasks } from '@/server/state/state';
 
 /** GET /api/tasks?repo=<id> -> Task[] */
 export async function GET(request: Request) {

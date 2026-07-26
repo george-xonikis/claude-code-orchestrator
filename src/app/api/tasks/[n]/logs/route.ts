@@ -3,8 +3,8 @@ import { NextResponse } from 'next/server';
 import type { LogEvent } from '@/lib/types';
 import { badRequest, parseIssueNumber, SSE_HEADERS } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { ensureLoopStarted } from '@/server/loop';
-import { readLogEvents, subscribeLogs } from '@/server/state';
+import { ensureLoopStarted } from '@/server/loop/loop';
+import { readLogEvents, subscribeLogs } from '@/server/state/state';
 
 export const dynamic = 'force-dynamic';
 

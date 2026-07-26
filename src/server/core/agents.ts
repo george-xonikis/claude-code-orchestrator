@@ -1,16 +1,16 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import type { AgentMeta, RepoInfo } from '@/lib/types';
+import type { AgentMeta, SkillMeta } from '@/lib/types';
 
 /**
- * Discovery of a managed repo's invocable subagents (its `.claude/agents/*.md`
- * definitions) and the start-time gate that a session's configured reviewer
- * agents actually exist.
+ * Discovery of a managed repo's capabilities: its invocable subagents
+ * (`.claude/agents/*.md`) and its skills (`.claude/skills/<dir>/SKILL.md`).
+ * Both are referenced in the implementation-session prompt so agents use the
+ * repo's own codified procedures instead of improvising — Hydra only surfaces
+ * them, it never enforces anything.
  *
  * A subagent's frontmatter `name` is the exact string the execution agent
- * passes as `subagent_type` to the built-in Task tool — so `name` is the one
- * identifier that flows through discovery, config, prompt, and the commit gate
- * (sessions.ts). It is always compared lowercased/trimmed.
+ * passes as `subagent_type` to the built-in Task tool.
  */
 
 /**
@@ -83,20 +83,33 @@ export async function listRepoAgents(repoPath: string): Promise<AgentMeta[]> {
 }
 
 /**
- * Throw if any configured reviewer agent is missing from the repo (empty list
- * is a no-op). Mirrors planning.ts's requirePersonaFiles — the thrown message
- * is surfaced to the developer via loop.ts's claim() catch.
+ * List the repo's skills by scanning .claude/skills/<dir>/SKILL.md and parsing
+ * each file's frontmatter. `name` falls back to the directory name when the
+ * frontmatter omits it. Sorted by name; [] if the directory is missing.
  */
-export async function requireReviewerAgents(
-  repo: RepoInfo,
-  reviewerNames: string[]
-): Promise<void> {
-  if (reviewerNames.length === 0) return;
-  const have = new Set((await listRepoAgents(repo.path)).map((agent) => agent.name.toLowerCase()));
-  const missing = reviewerNames.filter((name) => !have.has(name.trim().toLowerCase()));
-  if (missing.length > 0) {
-    throw new Error(
-      `Reviewer agents missing in ${repo.name}: ${missing.join(', ')} — add them under .claude/agents/ or update Execution settings`
-    );
+export async function listRepoSkills(repoPath: string): Promise<SkillMeta[]> {
+  const dir = path.join(repoPath, '.claude', 'skills');
+  let entries: string[];
+  try {
+    entries = (await fsp.readdir(dir, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
   }
+  const parsed = await Promise.all(
+    entries.map(async (skillDir): Promise<SkillMeta | null> => {
+      const raw = await fsp
+        .readFile(path.join(dir, skillDir, 'SKILL.md'), 'utf8')
+        .catch(() => null);
+      if (raw === null) return null;
+      const fm = parseAgentFrontmatter(raw);
+      const full = (fm.description ?? '').trim();
+      const description = full.length > 160 ? `${full.slice(0, 157)}…` : full;
+      return { name: (fm.name ?? '').trim() || skillDir, description, dir: skillDir };
+    })
+  );
+  return parsed
+    .filter((skill): skill is SkillMeta => skill !== null)
+    .sort((a, b) => a.name.localeCompare(b.name));
 }

@@ -1,14 +1,15 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { type PlanningRole, startPlanningPass } from '@/server/planning';
+import { type PlanningRole, startPlanningPass } from '@/server/planning/planning';
 
 const PLANNING_ROLES: readonly PlanningRole[] = ['engineer', 'pm'];
 
 /**
- * POST /api/planning/start?repo=<id> {roles?: ('engineer'|'pm')[]}
+ * POST /api/planning/start?repo=<id> {roles?: ('engineer'|'pm')[], adHoc?: boolean}
  * -> run a planning pass. Omit roles (or send both) for the full PE + PM pass;
- * send a single role to run just that agent.
+ * send a single role to run just that agent. adHoc: true marks a developer-driven
+ * ad-hoc pass — the only kind that injects the ad-hoc planning chat transcript.
  */
 export async function POST(request: Request) {
   const forbidden = rejectNonLocal(request);
@@ -18,7 +19,10 @@ export async function POST(request: Request) {
   if (repo instanceof NextResponse) return repo;
 
   try {
-    const body = (await request.json().catch(() => null)) as { roles?: unknown } | null;
+    const body = (await request.json().catch(() => null)) as {
+      roles?: unknown;
+      adHoc?: unknown;
+    } | null;
     let roles: PlanningRole[] | undefined;
     if (body?.roles !== undefined) {
       if (
@@ -30,7 +34,13 @@ export async function POST(request: Request) {
       }
       roles = [...new Set(body.roles)];
     }
-    const passId = await startPlanningPass(repo, roles ? { roles } : {});
+    if (body?.adHoc !== undefined && typeof body.adHoc !== 'boolean') {
+      return badRequest('adHoc must be a boolean');
+    }
+    const passId = await startPlanningPass(repo, {
+      ...(roles ? { roles } : {}),
+      ...(body?.adHoc !== undefined ? { adHoc: body.adHoc } : {}),
+    });
     return NextResponse.json({ ok: true, passId });
   } catch (err) {
     return errorResponse(err);

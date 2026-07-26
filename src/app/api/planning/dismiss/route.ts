@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { dismissProposals } from '@/server/planning';
+import { dismissProposals } from '@/server/planning/planning';
 
 /** POST /api/planning/dismiss?repo=<id> {passId, proposalIds} -> dismiss pending proposals. */
 export async function POST(request: Request) {

@@ -6,7 +6,7 @@ import {
   rejectNonLocal,
 } from '@/lib/api';
 import { resolveRepo } from '@/lib/repo-params';
-import { startIssue } from '@/server/loop';
+import { startIssue } from '@/server/loop/loop';
 
 /** POST /api/tasks/[n]/start?repo=<id> -> manually start an agent on a ready issue. */
 export async function POST(

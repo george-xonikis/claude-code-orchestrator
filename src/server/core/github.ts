@@ -12,7 +12,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { getDefaultBranch } from './worktrees';
+import { getDefaultBranch } from '@/server/core/worktrees';
 
 const execFileAsync = promisify(execFile);
 
@@ -294,6 +294,28 @@ export async function createPullRequest(
     throw new Error(`gh pr create did not return a PR url (got: ${url})`);
   }
   return { number: Number(match[1]), url };
+}
+
+/** GitHub's computed merge state of a PR against its base branch. */
+export type PrMergeable = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
+
+/**
+ * Ask GitHub whether a PR is mergeable. UNKNOWN means GitHub is still
+ * computing it (common right after a push) — treat it as "no change".
+ */
+export async function getPrMergeable(
+  repoPath: string,
+  prNumber: number
+): Promise<PrMergeable> {
+  const stdout = await gh(repoPath, [
+    'pr',
+    'view',
+    String(prNumber),
+    '--json',
+    'mergeable',
+  ]);
+  const { mergeable } = JSON.parse(stdout) as { mergeable?: string };
+  return mergeable === 'MERGEABLE' || mergeable === 'CONFLICTING' ? mergeable : 'UNKNOWN';
 }
 
 /** Find an open PR whose head branch matches, or null if none exists. */

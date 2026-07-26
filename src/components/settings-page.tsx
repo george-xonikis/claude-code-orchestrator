@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Bot, ClipboardList, Info, Target, Users, X } from 'lucide-react';
 
 import { MODEL_OPTIONS } from '@/lib/models';
@@ -12,11 +13,14 @@ import {
   type ExecutionConfig,
   getExecutionConfig,
   getPlanningConfig,
+  getProductMapState,
   getRepoAgents,
   getSettings,
   MAX_PLANNING_TOPICS,
   type PlanningConfig,
   type PlanningRole,
+  type ProductMapState,
+  runProductMapBootstrap,
   saveSettings,
   setExecutionConfig,
   setPlanningConfig,
@@ -155,7 +159,7 @@ function Section({
   return (
     <section className="space-y-3 py-6">
       <div>
-        <h2 className="text-base font-medium text-foreground">{title}</h2>
+        <h2 className="text-base font-bold text-foreground">{title}</h2>
         {description && <div className="mt-1 text-sm text-muted-foreground">{description}</div>}
       </div>
       <div className="space-y-2.5">{children}</div>
@@ -171,10 +175,15 @@ export function SettingsPage() {
   const [ecfg, setEcfg] = useState<ExecutionConfig | null>(null);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
   const [goal, setGoal] = useState('');
-  const [memory, setMemory] = useState('');
   const [planningMemory, setPlanningMemory] = useState('');
   const [topicDraft, setTopicDraft] = useState('');
-  const [tab, setTab] = useState<Tab>('agents');
+  // Product-map bootstrap lifecycle (Settings → Agents); polled while running.
+  const [mapState, setMapState] = useState<ProductMapState | null>(null);
+  // Deep link: /settings?tab=prompts (used by the Help page).
+  const requestedTab = useSearchParams().get('tab');
+  const [tab, setTab] = useState<Tab>(
+    TABS.some((candidate) => candidate.value === requestedTab) ? (requestedTab as Tab) : 'agents'
+  );
 
   // Reset during render when the repo changes (derived-state pattern).
   const [loadedRepoId, setLoadedRepoId] = useState(repoId);
@@ -184,9 +193,9 @@ export function SettingsPage() {
     setEcfg(null);
     setAgents([]);
     setGoal('');
-    setMemory('');
     setPlanningMemory('');
     setTopicDraft('');
+    setMapState(null);
   }
 
   useEffect(() => {
@@ -194,14 +203,53 @@ export function SettingsPage() {
     getPlanningConfig(repoId).then(setCfg).catch(() => {});
     getExecutionConfig(repoId).then(setEcfg).catch(() => {});
     getRepoAgents(repoId).then(setAgents).catch(() => {});
+    getProductMapState(repoId).then(setMapState).catch(() => {});
     getSettings(repoId)
       .then((s) => {
         setGoal(s.goal);
-        setMemory(s.memory);
         setPlanningMemory(s.planningMemory);
       })
       .catch(() => {});
   }, [repoId]);
+
+  // Poll the bootstrap while it runs so "running…" resolves without a reload.
+  const mapRunning = mapState?.status === 'running';
+  useEffect(() => {
+    if (!repoId || !mapRunning) return;
+    const id = setInterval(() => {
+      getProductMapState(repoId).then(setMapState).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [repoId, mapRunning]);
+
+  /** Kick off the one-shot product-map bootstrap; the poll above tracks it. */
+  const generateProductMap = () => {
+    if (!repoId || mapRunning) return;
+    setMapState({ status: 'running' }); // optimistic, so the button locks immediately
+    runProductMapBootstrap(repoId)
+      .then(() => getProductMapState(repoId).then(setMapState))
+      .catch((err) => {
+        // A rejected start (e.g. "already running") is not a failed RUN — show
+        // the server's actual state, and only surface the error when idle.
+        getProductMapState(repoId)
+          .then((state) =>
+            setMapState(
+              state?.status === 'running'
+                ? state
+                : {
+                    status: 'failed',
+                    error: err instanceof Error ? err.message : String(err),
+                  }
+            )
+          )
+          .catch(() =>
+            setMapState({
+              status: 'failed',
+              error: err instanceof Error ? err.message : String(err),
+            })
+          );
+      });
+  };
 
   /** Optimistically apply a planning-config patch and persist it (server echoes the sanitized config). */
   const patch = (p: Partial<PlanningConfig>) => {
@@ -228,14 +276,6 @@ export function SettingsPage() {
       : [...cfg.roles, role];
     if (next.length === 0) return; // keep at least one agent
     patch({ roles: next });
-  };
-
-  const toggleReviewer = (name: string) => {
-    if (!ecfg) return;
-    const next = ecfg.reviewerAgents.includes(name)
-      ? ecfg.reviewerAgents.filter((r) => r !== name)
-      : [...ecfg.reviewerAgents, name]; // empty is valid: no gate
-    patchExec({ reviewerAgents: next });
   };
 
   const addTopic = () => {
@@ -306,7 +346,7 @@ export function SettingsPage() {
 
         <div className="min-w-0 flex-1 divide-y divide-border md:max-w-2xl">
           <header className="pb-5">
-            <h2 className="text-2xl font-semibold tracking-tight">{activeTab?.label}</h2>
+            <h2 className="text-2xl font-bold tracking-tight">{activeTab?.label}</h2>
             <p className="mt-1 text-sm text-muted-foreground">{activeTab?.description}</p>
           </header>
 
@@ -316,6 +356,25 @@ export function SettingsPage() {
 
           {tab === 'planning' && cfg && (
             <>
+              <Section
+                title="Model"
+                description="The model planning passes run on — the PE/PM scans, synthesis, and the planning chats."
+              >
+                <Row label="Planning model">
+                  <select
+                    value={cfg.planningModel}
+                    onChange={(e) => patch({ planningModel: e.target.value })}
+                    className={SELECT_CLASS}
+                  >
+                    {MODEL_OPTIONS.map(({ id, label }) => (
+                      <option key={id} value={id}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </Row>
+              </Section>
+
               <Section
                 title="Run scope"
                 description="Which roles a planning pass runs — used by scheduled auto-runs and manual runs on the Planning page. Who fills each role is set in the Agents tab."
@@ -447,7 +506,7 @@ export function SettingsPage() {
 
               <MarkdownEditorSection
                 title="Planning memory"
-                description="Prioritization guidance the PE/PM personas read every pass — what's worth proposing, and what to avoid. Reasons you give when dismissing proposals are appended here automatically; curate freely. Stored in .orchestrator/planning-memory.md."
+                description="Prioritization guidance the PE/PM planning agents read every pass — what's worth proposing, and what to avoid. Reasons you give when dismissing proposals are appended here automatically; curate freely. Stored in .claude-hydra/planning-memory.md."
                 value={planningMemory}
                 minHeightClass="min-h-56 max-h-[32rem]"
                 placeholder="- We don't propose test-coverage work as features — tracked separately.&#10;- No broad rewrites; prefer incremental, shippable changes."
@@ -488,81 +547,6 @@ export function SettingsPage() {
               </Section>
 
               <Section
-                title="Reviewers"
-                description={
-                  <>
-                    Reviewers an execution agent{' '}
-                    <span className="font-medium">must run before it may commit</span>.
-                  </>
-                }
-              >
-                {ecfg.reviewerAgents.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {ecfg.reviewerAgents.map((name) => {
-                      const missing = !agents.some((a) => a.name === name);
-                      return (
-                        <span
-                          key={name}
-                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
-                            missing
-                              ? 'bg-destructive/10 text-destructive'
-                              : 'bg-secondary text-secondary-foreground'
-                          }`}
-                        >
-                          {name}
-                          <button
-                            type="button"
-                            onClick={() => toggleReviewer(name)}
-                            aria-label={`Remove ${name}`}
-                            className="opacity-70 hover:opacity-100"
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </span>
-                      );
-                    })}
-                  </div>
-                )}
-                {agents.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    No agents found in <code>.claude/agents/</code> for this repo.
-                  </p>
-                ) : (
-                  <select
-                    value=""
-                    onChange={(e) => {
-                      if (e.target.value) toggleReviewer(e.target.value);
-                    }}
-                    className={SELECT_CLASS}
-                  >
-                    <option value="">Add a reviewer…</option>
-                    {agents
-                      .filter((a) => !ecfg.reviewerAgents.includes(a.name))
-                      .map((a) => (
-                        <option key={a.name} value={a.name}>
-                          {a.name}
-                        </option>
-                      ))}
-                  </select>
-                )}
-                {ecfg.reviewerAgents.length === 0 ? (
-                  <p className="text-xs text-warning">
-                    ⚠️ No reviewer selected — commit review is{' '}
-                    <span className="font-medium">not enforced</span>.
-                  </p>
-                ) : (
-                  ecfg.reviewerAgents
-                    .filter((name) => !agents.some((a) => a.name === name))
-                    .map((name) => (
-                      <p key={name} className="text-xs text-destructive">
-                        ⚠️ <span className="font-medium">{name}</span> — missing from{' '}
-                        <code>.claude/agents/</code>; will block sessions until added or deselected.
-                      </p>
-                    ))
-                )}
-              </Section>
-
-              <Section
                 title="Product brief"
                 description="The agent that keeps this repo's product brief up to date"
               >
@@ -574,6 +558,43 @@ export function SettingsPage() {
                     defaultLabel="None"
                   />
                 </Row>
+                <Row
+                  label="Product map"
+                  hint="one-shot bootstrap; lands uncommitted at docs/product-map.md"
+                >
+                  <button
+                    type="button"
+                    disabled={!cfg.briefAgent || mapRunning}
+                    onClick={generateProductMap}
+                    className="inline-flex h-8 items-center rounded-md border border-border bg-elevated-secondary px-3 text-xs font-medium hover:bg-background-hover disabled:opacity-50"
+                  >
+                    {mapRunning ? 'Generating…' : 'Generate'}
+                  </button>
+                </Row>
+                {mapState && mapState.status !== 'idle' && (
+                  <p className="text-xs text-muted-foreground">
+                    {mapState.status === 'running' && 'Product map generation running…'}
+                    {mapState.status === 'done' && (
+                      <>
+                        Done
+                        {mapState.finishedAt
+                          ? ` — ${new Date(mapState.finishedAt).toLocaleString()}`
+                          : ''}
+                        . Review docs/product-map.md and commit it.
+                      </>
+                    )}
+                    {mapState.status === 'failed' && (
+                      <span className="text-destructive">
+                        Failed{mapState.error ? `: ${mapState.error}` : ''}
+                      </span>
+                    )}
+                  </p>
+                )}
+                {!cfg.briefAgent && (
+                  <p className="text-xs text-muted-foreground">
+                    Assign a brief maintainer above to generate the product map.
+                  </p>
+                )}
               </Section>
             </>
           )}
@@ -673,21 +694,12 @@ export function SettingsPage() {
                 </select>
               </Row>
             </Section>
-            <MarkdownEditorSection
-              title="Memory"
-              description="Reusable codebase lessons injected into every execution session. Agents append here via save_memory (stamped with the issue number) — curate freely, delete anything wrong. Stored in .orchestrator/memory.md."
-              value={memory}
-              minHeightClass="min-h-72 max-h-[36rem]"
-              placeholder="- [#312] The pre-commit hook requires all modified backend files staged…"
-              onChange={setMemory}
-              onSave={() => (repoId ? saveSettings(repoId, { memory }) : Promise.resolve())}
-            />
             </>
           )}
 
           {tab === 'goal' && (
             <MarkdownEditorSection
-              description="Steers this repo's planning and every agent session — vision, current priorities, what “done well” means. Stored in .orchestrator/goal.md."
+              description="Steers this repo's planning — vision, current priorities, what “done well” means. Execution agents work from the issue itself. Stored in .claude-hydra/goal.md."
               value={goal}
               minHeightClass="min-h-56 max-h-[32rem]"
               placeholder="e.g. Nous is a knowledge platform for SMEs. Current priority: …"

@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import { badRequest, errorResponse, rejectNonLocal } from '@/lib/api';
-import { removeRepo } from '@/server/repos';
+import { removeRepo } from '@/server/core/repos';
 
 /**
  * DELETE /api/repos/[id] -> remove a repo from the registry only.
- * Never touches the repo's files (.orchestrator/, .worktrees/ stay intact).
+ * Never touches the repo's files (.claude-hydra/, .worktrees/ stay intact).
  */
 export async function DELETE(
   request: Request,

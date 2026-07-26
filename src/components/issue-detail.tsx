@@ -256,15 +256,24 @@ function LogTail({ issueNumber, fallbackLines }: { issueNumber: number; fallback
     return () => source.close();
   }, [repoId, issueNumber]);
 
-  // Keep the newest line in view.
+  // Follow the newest line ONLY while the user is already at the bottom.
+  // Scrolling up to read pins the view in place; scrolling back down (within
+  // the threshold) resumes following.
+  const followRef = useRef(true);
+  const handleScroll = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
     const el = containerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && followRef.current) el.scrollTop = el.scrollHeight;
   }, [lines]);
 
   return (
     <div
       ref={containerRef}
+      onScroll={handleScroll}
       className="flex-1 overflow-y-auto overflow-x-hidden bg-elevated-secondary p-4 font-mono text-[11px] leading-5 text-muted-foreground"
     >
       {lines.length === 0 &&
