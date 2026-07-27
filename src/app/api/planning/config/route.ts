@@ -9,6 +9,7 @@ import {
   type PlanningRole,
   setPlanningConfig,
 } from '@/server/planning/planning';
+import { ensureRefinementScheduler } from '@/server/planning/refinement';
 
 const ROLES: readonly PlanningRole[] = ['engineer', 'pm'];
 
@@ -42,12 +43,14 @@ export async function POST(request: Request) {
 
     const patch: Partial<PlanningConfig> = {};
 
-    if ('intervalHours' in body) {
-      const h = body.intervalHours;
-      if (h !== null && !(isNum(h) && h >= 1 && h <= 168)) {
-        return badRequest('intervalHours must be null or a number between 1 and 168');
+    for (const key of ['intervalHours', 'refinementIntervalHours'] as const) {
+      if (key in body) {
+        const h = body[key];
+        if (h !== null && !(isNum(h) && h >= 1 && h <= 168)) {
+          return badRequest(`${key} must be null or a number between 1 and 168`);
+        }
+        patch[key] = h as number | null;
       }
-      patch.intervalHours = h as number | null;
     }
     if ('roles' in body) {
       if (!Array.isArray(body.roles) || body.roles.length === 0 || !body.roles.every(isRole)) {
@@ -93,6 +96,9 @@ export async function POST(request: Request) {
     }
 
     await setPlanningConfig(repo, patch);
+    // setPlanningConfig re-arms the planning timer itself; the refinement timer
+    // is armed here to keep refinement.ts's dependency on planning.ts one-way.
+    if (patch.refinementIntervalHours !== undefined) await ensureRefinementScheduler(repo);
     return NextResponse.json(await getPlanningConfig(repo));
   } catch (err) {
     return errorResponse(err);

@@ -8,6 +8,8 @@ import {
   DEFAULT_AGENTS_PLANNING_TEMPLATE,
   DEFAULT_PRODUCT_MAP_TEMPLATE,
   DEFAULT_PROPOSAL_DISCUSSION_TEMPLATE,
+  DEFAULT_REFINEMENT_SYNTHESIS_TEMPLATE,
+  DEFAULT_REFINEMENT_TEMPLATE,
   DEFAULT_SYNTHESIS_TEMPLATE,
 } from '@/server/planning/prompts';
 
@@ -34,6 +36,8 @@ export type PromptKind =
   | 'conflict'
   | 'agents-planning'
   | 'synthesis'
+  | 'refinement'
+  | 'refinement-synthesis'
   | 'adhoc-chat'
   | 'proposal-discussion'
   | 'product-map';
@@ -43,6 +47,8 @@ export const PROMPT_KINDS: readonly PromptKind[] = [
   'conflict',
   'agents-planning',
   'synthesis',
+  'refinement',
+  'refinement-synthesis',
   'adhoc-chat',
   'proposal-discussion',
   'product-map',
@@ -53,6 +59,8 @@ export const DEFAULT_TEMPLATES: Record<PromptKind, string> = {
   conflict: DEFAULT_CONFLICT_TEMPLATE,
   'agents-planning': DEFAULT_AGENTS_PLANNING_TEMPLATE,
   synthesis: DEFAULT_SYNTHESIS_TEMPLATE,
+  refinement: DEFAULT_REFINEMENT_TEMPLATE,
+  'refinement-synthesis': DEFAULT_REFINEMENT_SYNTHESIS_TEMPLATE,
   'adhoc-chat': DEFAULT_ADHOC_CHAT_TEMPLATE,
   'proposal-discussion': DEFAULT_PROPOSAL_DISCUSSION_TEMPLATE,
   'product-map': DEFAULT_PRODUCT_MAP_TEMPLATE,
@@ -72,6 +80,8 @@ export const TEMPLATE_PLACEHOLDERS: Record<PromptKind, string[]> = {
     'engineerReport',
     'pmReport',
   ],
+  refinement: ['personaBody', 'goal', 'planningMemory', 'items'],
+  'refinement-synthesis': ['engineerReport', 'pmReport', 'items'],
   'adhoc-chat': ['goal', 'currentProposals', 'transcript'],
   'proposal-discussion': ['goal', 'proposal', 'transcript'],
   'product-map': ['agentBody'],

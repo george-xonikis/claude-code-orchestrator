@@ -98,9 +98,41 @@ export interface PlanningProposal {
 
 /** One captured line of a planning pass's live agent activity. */
 export interface PlanningLogLine {
-  role: 'engineer' | 'pm' | 'synthesis';
+  role: 'engineer' | 'pm' | 'synthesis' | 'refinement';
   kind: 'text' | 'tool';
   text: string;
+}
+
+/** What a refinement verdict is about: a pending proposal, or a filed `proposed` issue. */
+export type RefinementTarget =
+  | { kind: 'proposal'; passId: string; proposalId: string }
+  | { kind: 'issue'; issueNumber: number; issueUrl?: string };
+
+/** One refinement judgement on a proposal/issue — a recommendation until the developer acts on it. */
+export interface RefinementVerdict {
+  id: string;
+  target: RefinementTarget;
+  title: string;
+  verdict: 'keep' | 'drop';
+  /** Why, grounded in the current code / goal (shown in the UI, and posted on drops). */
+  reasoning: string;
+  /** Suggested updated content for stale-but-worth-keeping items. */
+  rewrite?: { title: string; body: string };
+  /** Titles of other evaluated items this one duplicates or subsumes. */
+  overlapsWith?: string[];
+  /** What the developer did with the verdict (absent = still awaiting a decision). */
+  resolution?: 'applied' | 'rejected';
+}
+
+/** One refinement pass, newest first in .claude-hydra/planning.json. */
+export interface RefinementPass {
+  id: string;
+  startedAt: string;
+  status: 'running' | 'complete' | 'failed';
+  error?: string;
+  verdicts: RefinementVerdict[];
+  /** Streamed agent activity, kept so the pass log stays viewable when done. */
+  logs?: PlanningLogLine[];
 }
 
 /** One planning-pass run, newest first in .claude-hydra/planning.json. */

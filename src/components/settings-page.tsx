@@ -411,6 +411,34 @@ export function SettingsPage() {
               </Section>
 
               <Section
+                title="Refinement"
+                description="The PE and PM agents re-examine the open backlog (pending proposals and untouched proposed issues) against the current code and recommend keeping, rewriting, or dropping each item — you confirm every action on the Planning page."
+              >
+                <Row label="Schedule" hint="run a refinement pass automatically">
+                  <select
+                    value={
+                      cfg.refinementIntervalHours === null
+                        ? ''
+                        : String(cfg.refinementIntervalHours)
+                    }
+                    onChange={(e) =>
+                      patch({
+                        refinementIntervalHours:
+                          e.target.value === '' ? null : Number(e.target.value),
+                      })
+                    }
+                    className={SELECT_CLASS}
+                  >
+                    {INTERVAL_OPTIONS.map(({ value, label }) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </Row>
+              </Section>
+
+              <Section
                 title="Auto-file"
                 description={
                   <>

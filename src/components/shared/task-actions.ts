@@ -1,4 +1,11 @@
-import type { AgentMeta, DiscussionMessage, PlanningPass, Task, TaskStatus } from '@/lib/types';
+import type {
+  AgentMeta,
+  DiscussionMessage,
+  PlanningPass,
+  RefinementPass,
+  Task,
+  TaskStatus,
+} from '@/lib/types';
 import { ACTIVE_STATUSES } from '@/lib/task-helpers';
 
 // Re-exported so existing importers keep resolving these from this module.
@@ -83,6 +90,7 @@ export function saveSettings(repoId: string, patch: Partial<OrchestratorSettings
 
 export interface PlanningData {
   passes: PlanningPass[];
+  refinementPasses: RefinementPass[];
   intervalHours: number | null;
 }
 
@@ -114,6 +122,26 @@ export function startPlanningPass(
 /** Abort the in-flight planning pass for a repo. */
 export function cancelPlanningPass(repoId: string): Promise<void> {
   return post(`/api/planning/cancel${repoQuery(repoId)}`);
+}
+
+/** Run a refinement pass over the open backlog (pending proposals + untouched proposed issues). */
+export function startRefinementPass(repoId: string): Promise<void> {
+  return post(`/api/planning/refine/start${repoQuery(repoId)}`);
+}
+
+/** Abort the in-flight refinement pass for a repo. */
+export function cancelRefinementPass(repoId: string): Promise<void> {
+  return post(`/api/planning/refine/cancel${repoQuery(repoId)}`);
+}
+
+/** Resolve one refinement verdict: apply it (dismiss/close/rewrite) or reject it. */
+export function resolveRefinementVerdict(
+  repoId: string,
+  passId: string,
+  verdictId: string,
+  action: 'apply' | 'reject'
+): Promise<void> {
+  return post(`/api/planning/refine/apply${repoQuery(repoId)}`, { passId, verdictId, action });
 }
 
 /** Lifecycle of the one-shot product-map bootstrap run. */
@@ -196,6 +224,8 @@ export interface PlanningConfig {
   briefAgent: string | null;
   /** Model id planning-pass agent sessions run on. */
   planningModel: string;
+  /** Auto-run a refinement pass every N hours; null = manual only. */
+  refinementIntervalHours: number | null;
 }
 
 /** Per-repo execution config — session-management knobs for the auto-pickup loop. */
@@ -251,6 +281,8 @@ export type PromptKind =
   | 'conflict'
   | 'agents-planning'
   | 'synthesis'
+  | 'refinement'
+  | 'refinement-synthesis'
   | 'adhoc-chat'
   | 'proposal-discussion'
   | 'product-map';

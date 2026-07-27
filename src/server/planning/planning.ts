@@ -4,7 +4,13 @@ import { dataDir } from '@/server/core/data-dir';
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { PlanningLogLine, PlanningPass, PlanningProposal, RepoInfo } from '@/lib/types';
+import type {
+  PlanningLogLine,
+  PlanningPass,
+  PlanningProposal,
+  RefinementPass,
+  RepoInfo,
+} from '@/lib/types';
 import { isKnownModel } from '@/lib/models';
 import { listRepoAgents } from '@/server/core/agents';
 import { createIssue } from '@/server/core/github';
@@ -52,6 +58,8 @@ interface RepoPlanningState {
 
 interface PlanningGlobal {
   repos: Map<string, RepoPlanningState>;
+  /** Per-repo queue serializing planning.json load-modify-save mutations. */
+  writeQueues?: Map<string, Promise<void>>;
 }
 
 const globalRef = globalThis as typeof globalThis & {
@@ -108,6 +116,8 @@ export interface PlanningConfig {
   briefAgent: string | null;
   /** Model planning sessions run on (falls back to Opus when its quota is hit). */
   planningModel: string;
+  /** Auto-run a refinement pass every N hours; null = manual only. */
+  refinementIntervalHours: number | null;
 }
 
 /** Last product-map bootstrap run for a repo (persisted in planning.json). */
@@ -119,6 +129,8 @@ export interface ProductMapRun {
 
 interface PlanningStore extends PlanningConfig {
   passes: PlanningPass[];
+  /** Refinement passes over the existing proposals/issues, newest first. */
+  refinementPasses: RefinementPass[];
   /** Ad-hoc planning chat — the developer's direction for the next ad-hoc pass. */
   steering: DiscussionMessage[];
   /** Last product-map bootstrap run, if any. */
@@ -160,6 +172,7 @@ const CONFIG_DEFAULTS: PlanningConfig = {
   pmAgent: null,
   briefAgent: null,
   planningModel: DEFAULT_PLANNING_MODEL,
+  refinementIntervalHours: null,
 };
 
 /** Trim an agent-name assignment; empty -> null. Existence is checked at pass start. */
@@ -207,6 +220,7 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       /** Legacy single master toggle — migrated to autoFile (autoStart now lives in execution config). */
       autonomous?: boolean;
       passes?: PlanningPass[];
+      refinementPasses?: RefinementPass[];
       steering?: unknown;
       productMapRun?: ProductMapRun;
     };
@@ -227,12 +241,14 @@ async function loadStore(repoPath: string): Promise<PlanningStore> {
       planningModel: isKnownModel(parsed.planningModel)
         ? parsed.planningModel
         : DEFAULT_PLANNING_MODEL,
+      refinementIntervalHours: parsed.refinementIntervalHours ?? null,
       passes: parsed.passes ?? [],
+      refinementPasses: Array.isArray(parsed.refinementPasses) ? parsed.refinementPasses : [],
       steering: sanitizeSteering(parsed.steering),
       ...(parsed.productMapRun ? { productMapRun: parsed.productMapRun } : {}),
     };
   } catch {
-    return { ...CONFIG_DEFAULTS, passes: [], steering: [] };
+    return { ...CONFIG_DEFAULTS, passes: [], refinementPasses: [], steering: [] };
   }
 }
 
@@ -244,16 +260,41 @@ async function saveStore(repoPath: string, store: PlanningStore): Promise<void> 
   await fsp.rename(tmp, file);
 }
 
+/**
+ * Serialize a load-modify-save mutation of a repo's planning.json. Two
+ * background writers can run for minutes at a time (a planning pass and a
+ * refinement pass both flush logs every few seconds); without a queue one
+ * writer's save clobbers whatever another committed between its load and its
+ * save. Reads don't need the queue — saveStore's atomic rename keeps them safe.
+ */
+function withStore<T>(repoPath: string, fn: () => Promise<T>): Promise<T> {
+  globalRef.__orchestratorPlanning ??= { repos: new Map() };
+  const g = globalRef.__orchestratorPlanning;
+  g.writeQueues ??= new Map();
+  const prev = g.writeQueues.get(repoPath) ?? Promise.resolve();
+  const run = prev.then(fn);
+  g.writeQueues.set(
+    repoPath,
+    run.then(
+      () => undefined,
+      () => undefined
+    )
+  );
+  return run;
+}
+
 async function updatePass(
   repoPath: string,
   passId: string,
   update: (pass: PlanningPass) => void
 ): Promise<void> {
-  const store = await loadStore(repoPath);
-  const pass = store.passes.find((p) => p.id === passId);
-  if (!pass) return;
-  update(pass);
-  await saveStore(repoPath, store);
+  await withStore(repoPath, async () => {
+    const store = await loadStore(repoPath);
+    const pass = store.passes.find((p) => p.id === passId);
+    if (!pass) return;
+    update(pass);
+    await saveStore(repoPath, store);
+  });
 }
 
 export async function getPlanning(repo: RepoInfo): Promise<PlanningStore> {
@@ -292,11 +333,13 @@ export async function ensurePlanningScheduler(repo: RepoInfo): Promise<void> {
 export async function getPlanningConfig(repo: RepoInfo): Promise<PlanningConfig> {
   const {
     passes: _passes,
+    refinementPasses: _refinementPasses,
     steering: _steering,
     productMapRun: _productMapRun,
     ...config
   } = await loadStore(repo.path);
   void _passes;
+  void _refinementPasses;
   void _steering;
   void _productMapRun;
   return config;
@@ -307,29 +350,34 @@ export async function setPlanningConfig(
   repo: RepoInfo,
   patch: Partial<PlanningConfig>
 ): Promise<void> {
-  const store = await loadStore(repo.path);
-  const intervalChanged =
-    patch.intervalHours !== undefined && patch.intervalHours !== store.intervalHours;
+  let intervalChanged = false;
+  await withStore(repo.path, async () => {
+    const store = await loadStore(repo.path);
+    intervalChanged =
+      patch.intervalHours !== undefined && patch.intervalHours !== store.intervalHours;
 
-  if (patch.intervalHours !== undefined) store.intervalHours = patch.intervalHours;
-  if (patch.roles !== undefined) store.roles = sanitizeRoles(patch.roles);
-  if (patch.autoFile !== undefined) store.autoFile = patch.autoFile;
-  if (patch.maxAutoFile !== undefined)
-    store.maxAutoFile = clampInt(patch.maxAutoFile, 0, 9, store.maxAutoFile);
-  if (patch.maxProposals !== undefined)
-    store.maxProposals = clampInt(patch.maxProposals, 1, 20, store.maxProposals);
-  if (patch.minImpact !== undefined) store.minImpact = clampInt(patch.minImpact, 1, 5, store.minImpact);
-  if (patch.maxEffort !== undefined) store.maxEffort = clampInt(patch.maxEffort, 1, 5, store.maxEffort);
-  if (patch.topics !== undefined) store.topics = sanitizeTopics(patch.topics);
-  if (patch.peAgent !== undefined) store.peAgent = sanitizeAgentName(patch.peAgent);
-  if (patch.pmAgent !== undefined) store.pmAgent = sanitizeAgentName(patch.pmAgent);
-  if (patch.briefAgent !== undefined) store.briefAgent = sanitizeAgentName(patch.briefAgent);
-  if (patch.planningModel !== undefined)
-    store.planningModel = isKnownModel(patch.planningModel)
-      ? patch.planningModel
-      : DEFAULT_PLANNING_MODEL;
+    if (patch.intervalHours !== undefined) store.intervalHours = patch.intervalHours;
+    if (patch.roles !== undefined) store.roles = sanitizeRoles(patch.roles);
+    if (patch.autoFile !== undefined) store.autoFile = patch.autoFile;
+    if (patch.maxAutoFile !== undefined)
+      store.maxAutoFile = clampInt(patch.maxAutoFile, 0, 9, store.maxAutoFile);
+    if (patch.maxProposals !== undefined)
+      store.maxProposals = clampInt(patch.maxProposals, 1, 20, store.maxProposals);
+    if (patch.minImpact !== undefined) store.minImpact = clampInt(patch.minImpact, 1, 5, store.minImpact);
+    if (patch.maxEffort !== undefined) store.maxEffort = clampInt(patch.maxEffort, 1, 5, store.maxEffort);
+    if (patch.topics !== undefined) store.topics = sanitizeTopics(patch.topics);
+    if (patch.peAgent !== undefined) store.peAgent = sanitizeAgentName(patch.peAgent);
+    if (patch.pmAgent !== undefined) store.pmAgent = sanitizeAgentName(patch.pmAgent);
+    if (patch.briefAgent !== undefined) store.briefAgent = sanitizeAgentName(patch.briefAgent);
+    if (patch.planningModel !== undefined)
+      store.planningModel = isKnownModel(patch.planningModel)
+        ? patch.planningModel
+        : DEFAULT_PLANNING_MODEL;
+    if (patch.refinementIntervalHours !== undefined)
+      store.refinementIntervalHours = patch.refinementIntervalHours;
 
-  await saveStore(repo.path, store);
+    await saveStore(repo.path, store);
+  });
   if (intervalChanged) await ensurePlanningScheduler(repo);
 }
 
@@ -378,10 +426,10 @@ function isUsageLimitError(err: unknown): boolean {
 }
 
 /** A single captured activity line, role-tagged later by the caller. */
-type LogEvent = { kind: PlanningLogLine['kind']; text: string };
+export type LogEvent = { kind: PlanningLogLine['kind']; text: string };
 
 /** Run one query on the configured planning model, retrying once on Opus if limited. */
-async function runPlanningQuery(
+export async function runPlanningQuery(
   repoPath: string,
   prompt: string,
   extras?: Parameters<typeof runQuery>[3],
@@ -511,7 +559,7 @@ async function resolvePersonaFile(
  * can run. Throws when a role has no assigned agent, and names any assigned
  * agents that no longer exist in the repo (surfaced on the Planning page).
  */
-async function requirePersonaFiles(
+export async function requirePersonaFiles(
   repo: RepoInfo,
   roles: PlanningRole[],
   config: PlanningConfig
@@ -614,6 +662,25 @@ export async function startPlanningPass(
 ): Promise<string> {
   const g = planningState(repo.id);
   if (g.running) throw new Error('A planning pass is already running');
+  // Claim the run slot before beginPlanningPass's awaits, so two rapid starts
+  // can't both pass the guard; released again when pre-flight fails.
+  g.running = true;
+  g.cancelled = false;
+  try {
+    return await beginPlanningPass(repo, options, g);
+  } catch (err) {
+    g.running = false;
+    g.abort = null;
+    throw err;
+  }
+}
+
+/** Pre-flight + launch, once the run slot is claimed (see startPlanningPass). */
+async function beginPlanningPass(
+  repo: RepoInfo,
+  options: { auto?: boolean; roles?: PlanningRole[]; adHoc?: boolean },
+  g: RepoPlanningState
+): Promise<string> {
   const store = await loadStore(repo.path);
   // Manual runs pass an explicit scope; scheduled/auto runs use the config roles.
   const roles: PlanningRole[] =
@@ -634,8 +701,6 @@ export async function startPlanningPass(
     readPromptTemplate('agents-planning'),
     readPromptTemplate('synthesis'),
   ]);
-  g.running = true;
-  g.cancelled = false;
   const abort = new AbortController();
   g.abort = abort;
 
@@ -648,8 +713,12 @@ export async function startPlanningPass(
   };
   // Digest of prior proposals (before this pass) so agents skip re-proposing them.
   const exclusions = exclusionDigest(store.passes);
-  store.passes.unshift(pass);
-  await saveStore(repo.path, store);
+  await withStore(repo.path, async () => {
+    // Fresh load inside the queue — the snapshot above may predate other writes.
+    const s = await loadStore(repo.path);
+    s.passes.unshift(pass);
+    await saveStore(repo.path, s);
+  });
 
   void (async () => {
     // Collect live agent activity so the pass log stays viewable after it ends.
@@ -767,21 +836,26 @@ export async function fileProposals(
   passId: string,
   proposalIds: string[]
 ): Promise<void> {
-  const store = await loadStore(repo.path);
-  const pass = store.passes.find((p) => p.id === passId);
-  if (!pass) throw new Error(`Unknown planning pass ${passId}`);
-  for (const id of proposalIds) {
-    const proposal = pass.proposals.find((p) => p.id === id);
-    if (!proposal || proposal.status !== 'pending') continue;
-    const issue = await createIssue(repo.path, proposal.title, proposal.body, [
-      ...proposal.labels,
-      'proposed',
-    ]);
-    proposal.status = 'filed';
-    proposal.issueNumber = issue.number;
-    proposal.issueUrl = issue.url;
-    await saveStore(repo.path, store); // persist after each so a mid-batch failure loses nothing
-  }
+  // The whole batch holds the write queue (including the createIssue calls) so
+  // its loaded store stays authoritative across the per-proposal saves; a log
+  // flush queued behind it just waits a few seconds longer.
+  await withStore(repo.path, async () => {
+    const store = await loadStore(repo.path);
+    const pass = store.passes.find((p) => p.id === passId);
+    if (!pass) throw new Error(`Unknown planning pass ${passId}`);
+    for (const id of proposalIds) {
+      const proposal = pass.proposals.find((p) => p.id === id);
+      if (!proposal || proposal.status !== 'pending') continue;
+      const issue = await createIssue(repo.path, proposal.title, proposal.body, [
+        ...proposal.labels,
+        'proposed',
+      ]);
+      proposal.status = 'filed';
+      proposal.issueNumber = issue.number;
+      proposal.issueUrl = issue.url;
+      await saveStore(repo.path, store); // persist after each so a mid-batch failure loses nothing
+    }
+  });
 }
 
 /**
@@ -832,6 +906,42 @@ export async function dismissProposals(
 }
 
 // ---------------------------------------------------------------------------
+// Refinement store accessors (the pass itself runs in ./refinement.ts)
+// ---------------------------------------------------------------------------
+
+/** How many refinement passes to keep (newest first) — older ones age out. */
+const MAX_REFINEMENT_PASSES = 10;
+
+/** Prepend a new refinement pass to the store. */
+export async function addRefinementPass(repoPath: string, pass: RefinementPass): Promise<void> {
+  await withStore(repoPath, async () => {
+    const store = await loadStore(repoPath);
+    store.refinementPasses = [pass, ...store.refinementPasses].slice(0, MAX_REFINEMENT_PASSES);
+    await saveStore(repoPath, store);
+  });
+}
+
+/** Mutate one refinement pass in place (same pattern as updatePass). */
+export async function updateRefinementPass(
+  repoPath: string,
+  passId: string,
+  update: (pass: RefinementPass) => void
+): Promise<void> {
+  await withStore(repoPath, async () => {
+    const store = await loadStore(repoPath);
+    const pass = store.refinementPasses.find((p) => p.id === passId);
+    if (!pass) return;
+    update(pass);
+    await saveStore(repoPath, store);
+  });
+}
+
+/** All stored refinement passes, newest first. */
+export async function getRefinementPasses(repoPath: string): Promise<RefinementPass[]> {
+  return (await loadStore(repoPath)).refinementPasses;
+}
+
+// ---------------------------------------------------------------------------
 // Ad-hoc planning chat (the pass-level chat on the planning page)
 //
 // A cheap conversational turn that shapes WHAT the next ad-hoc pass looks for.
@@ -850,10 +960,12 @@ export async function setPlanningSteering(
   repo: RepoInfo,
   messages: DiscussionMessage[]
 ): Promise<DiscussionMessage[]> {
-  const store = await loadStore(repo.path);
-  store.steering = sanitizeSteering(messages);
-  await saveStore(repo.path, store);
-  return store.steering;
+  return withStore(repo.path, async () => {
+    const store = await loadStore(repo.path);
+    store.steering = sanitizeSteering(messages);
+    await saveStore(repo.path, store);
+    return store.steering;
+  });
 }
 
 /**
@@ -888,9 +1000,11 @@ export async function getProductMapState(repo: RepoInfo): Promise<ProductMapRun 
 
 /** Persist the product-map bootstrap run state (called by the runner). */
 export async function setProductMapRun(repoPath: string, run: ProductMapRun): Promise<void> {
-  const store = await loadStore(repoPath);
-  store.productMapRun = run;
-  await saveStore(repoPath, store);
+  await withStore(repoPath, async () => {
+    const store = await loadStore(repoPath);
+    store.productMapRun = run;
+    await saveStore(repoPath, store);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -898,8 +1012,8 @@ export async function setProductMapRun(repoPath: string, run: ProductMapRun): Pr
 // Prompt + DiscussionMessage type live in ./prompts/proposal-discussion.
 // ---------------------------------------------------------------------------
 
-/** Patch a proposal's content in place (discussion tool). */
-async function updateProposalContent(
+/** Patch a proposal's content in place (discussion tool, refinement rewrites). */
+export async function updateProposalContent(
   repoPath: string,
   passId: string,
   proposalId: string,

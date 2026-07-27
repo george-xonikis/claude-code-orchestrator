@@ -166,6 +166,13 @@ export async function commentOnIssue(repoPath: string, issueNumber: number, body
   await gh(repoPath, ['issue', 'comment', String(issueNumber), '--body', body]);
 }
 
+/** Close an issue, optionally with an explanatory comment (refinement drops). */
+export async function closeIssue(repoPath: string, issueNumber: number, comment?: string): Promise<void> {
+  const args = ['issue', 'close', String(issueNumber)];
+  if (comment) args.push('--comment', comment);
+  await gh(repoPath, args);
+}
+
 /** Raw title/body of one issue (for editing — no comments appended). */
 export async function getIssueDetails(
   repoPath: string,

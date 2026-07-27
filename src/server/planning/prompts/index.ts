@@ -18,3 +18,10 @@ export {
   type DiscussionMessage,
 } from './discussion';
 export { buildProductMapPrompt, DEFAULT_PRODUCT_MAP_TEMPLATE } from './product-map';
+export {
+  DEFAULT_REFINEMENT_SYNTHESIS_TEMPLATE,
+  DEFAULT_REFINEMENT_TEMPLATE,
+  refinementAgentPrompt,
+  refinementSynthesisPrompt,
+  type RefinementItem,
+} from './refinement';

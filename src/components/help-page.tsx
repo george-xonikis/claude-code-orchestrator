@@ -25,7 +25,7 @@ const PIPELINES: Layer[] = [
   {
     name: 'Planning',
     tagline: 'Decides WHAT to build. Never implements.',
-    contains: ['agents planning (PE/PM)', 'proposal synthesis', 'ad-hoc planning', 'files approved issues'],
+    contains: ['agents planning (PE/PM)', 'proposal synthesis', 'backlog refinement', 'ad-hoc planning', 'files approved issues'],
     independence: 'Lives without execution — its output is just GitHub issues.',
   },
   {
@@ -133,6 +133,19 @@ const PROMPT_INVENTORY = [
           'Dedupes and merges the PE + PM reports',
           'Ranks by leverage; respects impact/effort/topic caps and exclusions',
           'Output: strict JSON — title, body, labels, effort, impact per proposal',
+        ],
+      },
+      {
+        name: 'Refinement',
+        what: 'the PE/PM agents re-examine the open backlog against the current state of the code',
+        rules: [
+          'Evaluates pending proposals AND filed `proposed` issues no agent has touched',
+          'Reuses the assigned PE and PM planning agents: each judges every item read-only, in parallel',
+          'A synthesis step merges their reports into final verdicts — conservative on disagreement',
+          'Judges against the goal, planning memory, and overlap between items',
+          'Output: keep/drop verdicts with reasoning, plus optional rewrites for stale items',
+          'Recommends only — every drop/rewrite waits for the developer’s click; confirmed drops close the issue with a comment and feed planning memory',
+          'Runs on the Refine button or its own interval (Settings → Planning)',
         ],
       },
       {

@@ -14,13 +14,20 @@ import {
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-import type { PlanningLogLine, PlanningPass, PlanningProposal } from '@/lib/types';
+import type {
+  PlanningLogLine,
+  PlanningPass,
+  PlanningProposal,
+  RefinementPass,
+  RefinementVerdict,
+} from '@/lib/types';
 import { ClaudeLogo } from '@/components/shared/claude-logo';
 import { EFFORT_METER, GradeMeter, IMPACT_METER } from '@/components/shared/grade-meter';
 import { LabelChip } from '@/components/shared/label-chip';
 import { PlanningSteeringChat } from '@/components/planning-steering-chat';
 import {
   cancelPlanningPass,
+  cancelRefinementPass,
   clearProposalDiscussion,
   discussProposal,
   dismissPlanningProposals,
@@ -30,7 +37,9 @@ import {
   getPlanningConfig,
   type PlanningConfig,
   type PlanningRole,
+  resolveRefinementVerdict,
   startPlanningPass,
+  startRefinementPass,
 } from '@/components/shared/task-actions';
 import { useRepo } from '@/components/shared/use-repo';
 
@@ -191,6 +200,7 @@ const LOG_ROLE_META: Record<PlanningLogLine['role'], { label: string; className:
   engineer: { label: 'PE', className: 'text-info' },
   pm: { label: 'PM', className: 'text-warning' },
   synthesis: { label: 'SYN', className: 'text-success' },
+  refinement: { label: 'REF', className: 'text-primary' },
 };
 
 /** Collapsible accordion of a pass's captured agent activity; stays viewable when done. */
@@ -250,6 +260,203 @@ function PassLog({ logs, running }: { logs: PlanningLogLine[]; running: boolean 
   );
 }
 
+/**
+ * One refinement verdict: badge, reasoning, optional rewrite preview, and the
+ * Apply/Ignore pair. Everything is a recommendation until Apply is pressed —
+ * drops dismiss the proposal or close the issue, rewrites update the content.
+ */
+function VerdictCard({
+  verdict,
+  busy,
+  onResolve,
+}: {
+  verdict: RefinementVerdict;
+  busy: boolean;
+  onResolve: (verdictId: string, action: 'apply' | 'reject') => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const resolved = verdict.resolution !== undefined;
+  // A plain "keep" needs no decision — there is nothing to execute.
+  const actionable = !resolved && (verdict.verdict === 'drop' || verdict.rewrite !== undefined);
+  const applyLabel =
+    verdict.verdict === 'drop'
+      ? verdict.target.kind === 'issue'
+        ? `Close #${verdict.target.issueNumber}`
+        : 'Dismiss proposal'
+      : 'Apply rewrite';
+
+  return (
+    <div
+      className={`rounded-lg border border-border bg-elevated-secondary p-4 ${
+        resolved ? 'opacity-60' : ''
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold leading-snug">{verdict.title}</div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                verdict.verdict === 'drop'
+                  ? 'bg-destructive/15 text-destructive'
+                  : 'bg-success-muted text-success'
+              }`}
+            >
+              {verdict.verdict === 'drop' ? 'DROP' : 'KEEP'}
+            </span>
+            {verdict.rewrite && (
+              <span className="inline-flex items-center rounded-full bg-warning-muted px-2 py-0.5 text-[10px] font-semibold text-warning">
+                REWRITE
+              </span>
+            )}
+            {verdict.target.kind === 'issue' &&
+              (verdict.target.issueUrl ? (
+                <a
+                  href={verdict.target.issueUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs font-semibold text-info hover:underline"
+                >
+                  #{verdict.target.issueNumber} ↗
+                </a>
+              ) : (
+                <span className="text-xs font-semibold text-info">
+                  #{verdict.target.issueNumber}
+                </span>
+              ))}
+            {verdict.target.kind === 'proposal' && (
+              <span className="text-[11px] text-muted-foreground">proposal</span>
+            )}
+            {resolved && (
+              <span className="text-[11px] text-muted-foreground">
+                {verdict.resolution === 'applied' ? 'applied' : 'ignored'}
+              </span>
+            )}
+          </div>
+          {verdict.reasoning && (
+            <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+              {verdict.reasoning}
+            </p>
+          )}
+          {verdict.overlapsWith && verdict.overlapsWith.length > 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Overlaps: {verdict.overlapsWith.join(' · ')}
+            </p>
+          )}
+          {verdict.rewrite && (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                {expanded ? (
+                  <ChevronDown className="h-3 w-3" />
+                ) : (
+                  <ChevronRight className="h-3 w-3" />
+                )}
+                {expanded ? 'Hide suggested rewrite' : 'Show suggested rewrite'}
+              </button>
+              {expanded && (
+                <div className="markdown-preview mt-2 max-h-[36rem] overflow-auto rounded-md bg-main-surface-primary p-4">
+                  <div className="mb-2 text-sm font-semibold">{verdict.rewrite.title}</div>
+                  <Markdown remarkPlugins={[remarkGfm]}>{verdict.rewrite.body}</Markdown>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {actionable && (
+          <div className="flex shrink-0 gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onResolve(verdict.id, 'apply')}
+              className={`inline-flex h-7 items-center rounded-md px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 ${
+                verdict.verdict === 'drop' ? 'bg-destructive' : 'bg-primary'
+              }`}
+            >
+              {applyLabel}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onResolve(verdict.id, 'reject')}
+              className="inline-flex h-7 items-center rounded-md border border-border bg-elevated-secondary px-2.5 text-xs font-medium hover:bg-background-hover disabled:opacity-50"
+            >
+              Ignore
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The latest refinement pass: status, live log, and the verdict list. Plain
+ * "keep" verdicts collapse into a one-line summary — only verdicts that need
+ * a decision (drops and rewrites) get cards.
+ */
+function RefinementSection({
+  pass,
+  busy,
+  onResolve,
+}: {
+  pass: RefinementPass;
+  busy: boolean;
+  onResolve: (passId: string, verdictId: string, action: 'apply' | 'reject') => void;
+}) {
+  const actionable = pass.verdicts.filter(
+    (v) => v.verdict === 'drop' || v.rewrite !== undefined
+  );
+  const plainKeeps = pass.verdicts.length - actionable.length;
+
+  return (
+    <section>
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Refinement · {new Date(pass.startedAt).toLocaleString()} · {pass.status}
+        {pass.status === 'complete' && ` · ${pass.verdicts.length} items reviewed`}
+      </div>
+      {pass.status === 'running' && (
+        <p className="mb-2 text-sm text-muted-foreground">
+          The PE and PM agents are re-checking every open proposal against the current code — this
+          takes a few minutes…
+        </p>
+      )}
+      {pass.status === 'failed' &&
+        (pass.error?.startsWith('Cancelled') ? (
+          <p className="mb-2 text-sm text-muted-foreground">Refinement cancelled</p>
+        ) : (
+          <p className="mb-2 text-sm text-destructive">Refinement failed: {pass.error}</p>
+        ))}
+      <PassLog logs={pass.logs ?? []} running={pass.status === 'running'} />
+      {pass.status === 'complete' && (
+        <div className="flex flex-col gap-2">
+          {plainKeeps > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {plainKeeps} item{plainKeeps === 1 ? '' : 's'} confirmed still valid as written.
+            </p>
+          )}
+          {actionable.map((verdict) => (
+            <VerdictCard
+              key={verdict.id}
+              verdict={verdict}
+              busy={busy}
+              onResolve={(verdictId, action) => onResolve(pass.id, verdictId, action)}
+            />
+          ))}
+          {actionable.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              The backlog holds up — nothing to drop or rewrite.
+            </p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 type ProposalStatus = PlanningProposal['status'];
 
 const STATUS_FILTER_STORAGE_KEY = 'orchestrator-planning-hidden-statuses';
@@ -287,6 +494,8 @@ export function PlanningPage() {
   const { current, loaded: reposLoaded } = useRepo();
   const repoId = current?.id ?? null;
   const [passes, setPasses] = useState<PlanningPass[]>([]);
+  const [refinementPasses, setRefinementPasses] = useState<RefinementPass[]>([]);
+  const [refineError, setRefineError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -306,7 +515,10 @@ export function PlanningPage() {
   const refresh = useCallback(() => {
     if (!repoId) return;
     getPlanning(repoId)
-      .then((data) => setPasses(data.passes))
+      .then((data) => {
+        setPasses(data.passes);
+        setRefinementPasses(data.refinementPasses ?? []);
+      })
       .catch(() => {})
       .finally(() => setLoaded(true));
   }, [repoId]);
@@ -317,6 +529,8 @@ export function PlanningPage() {
   if (loadedRepoId !== repoId) {
     setLoadedRepoId(repoId);
     setPasses([]);
+    setRefinementPasses([]);
+    setRefineError(null);
     setSelected(new Set());
     setDiscussing(null);
     setSteeringOpen(false);
@@ -327,13 +541,25 @@ export function PlanningPage() {
 
   const latest = passes[0];
   const running = latest?.status === 'running';
+  const refining = refinementPasses[0]?.status === 'running';
+  // The latest refinement pass always shows; older ones stay visible only while
+  // they still hold unresolved drop/rewrite verdicts, so a newer (e.g. failed)
+  // pass can't strand pending decisions.
+  const visibleRefinements = refinementPasses.filter(
+    (pass, index) =>
+      index === 0 ||
+      (pass.status === 'complete' &&
+        pass.verdicts.some(
+          (v) => !v.resolution && (v.verdict === 'drop' || v.rewrite !== undefined)
+        ))
+  );
 
-  // Poll while a pass is running.
+  // Poll while a planning or refinement pass is running.
   useEffect(() => {
-    if (!running) return;
+    if (!running && !refining) return;
     const id = setInterval(refresh, 5000);
     return () => clearInterval(id);
-  }, [running, refresh]);
+  }, [running, refining, refresh]);
 
   // Selection works across ALL passes — keys are `${passId}:${proposalId}`.
   const toggle = (passId: string, proposalId: string) => {
@@ -415,6 +641,42 @@ export function PlanningPage() {
       .then(refresh)
       .catch(() => {})
       .finally(() => setCancelling(false));
+  };
+
+  /** Refinement reuses the assigned PE/PM planning agents, so it needs them too. */
+  const handleRefine = () => {
+    if (!repoId) return;
+    setBusy(true);
+    setRefineError(null);
+    startRefinementPass(repoId)
+      .then(refresh)
+      .catch((err) =>
+        setRefineError(err instanceof Error ? err.message : 'Could not start the refinement pass')
+      )
+      .finally(() => setBusy(false));
+  };
+
+  const handleRefineCancel = () => {
+    if (!repoId) return;
+    setCancelling(true);
+    cancelRefinementPass(repoId)
+      .then(refresh)
+      .catch(() => {})
+      .finally(() => setCancelling(false));
+  };
+
+  /** Apply or ignore one verdict; applying may dismiss a proposal or close an issue. */
+  const handleResolveVerdict = (passId: string, verdictId: string, action: 'apply' | 'reject') => {
+    if (!repoId) return;
+    setBusy(true);
+    setRefineError(null);
+    resolveRefinementVerdict(repoId, passId, verdictId, action)
+      .then(refresh)
+      .catch((err) =>
+        // Applying mutates GitHub — a failure (auth, already closed) must not look like success.
+        setRefineError(err instanceof Error ? err.message : 'Could not apply the verdict')
+      )
+      .finally(() => setBusy(false));
   };
 
   const act = (
@@ -502,6 +764,19 @@ export function PlanningPage() {
           </button>
           <button
             type="button"
+            disabled={busy || refining || !agentsAssigned}
+            onClick={handleRefine}
+            title={
+              agentsAssigned
+                ? 'The PE and PM agents re-check every open proposal against the current code'
+                : 'Assign the PE and PM planning agents first'
+            }
+            className="inline-flex h-8 items-center rounded-md border border-border bg-elevated-secondary px-4 text-xs font-semibold tracking-wide hover:bg-background-hover disabled:opacity-50"
+          >
+            {refining ? 'Refining…' : 'Refine'}
+          </button>
+          <button
+            type="button"
             disabled={busy || running || !agentsAssigned}
             onClick={handleStart}
             title={agentsAssigned ? undefined : 'Assign the PE and PM planning agents first'}
@@ -509,11 +784,11 @@ export function PlanningPage() {
           >
             {running ? 'Planning…' : 'Plan'}
           </button>
-          {running && (
+          {(running || refining) && (
             <button
               type="button"
               disabled={cancelling}
-              onClick={handleCancel}
+              onClick={running ? handleCancel : handleRefineCancel}
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated-secondary px-3 text-xs font-medium hover:bg-background-hover disabled:opacity-50"
             >
               <X className="h-3.5 w-3.5" />
@@ -538,6 +813,21 @@ export function PlanningPage() {
           </a>
         </div>
       )}
+
+      {refineError && (
+        <div className="rounded-lg border border-warning/40 bg-warning-muted/40 px-4 py-3 text-[13px] leading-relaxed">
+          {refineError}
+        </div>
+      )}
+
+      {visibleRefinements.map((pass) => (
+        <RefinementSection
+          key={pass.id}
+          pass={pass}
+          busy={busy}
+          onResolve={handleResolveVerdict}
+        />
+      ))}
 
       {passes.length === 0 && (
         <p className="text-sm text-muted-foreground">No planning passes yet — run the first one.</p>
